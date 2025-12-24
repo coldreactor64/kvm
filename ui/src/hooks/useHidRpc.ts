@@ -5,6 +5,8 @@ import { useRTCStore } from "@hooks/stores";
 
 import {
   CancelKeyboardMacroReportMessage,
+  GamepadReportMessage,
+  GamepadState,
   HID_RPC_VERSION,
   HandshakeMessage,
   KeyboardMacroStep,
@@ -277,6 +279,16 @@ export function useHidRpc(onHidRpcMessage?: (payload: RpcMessage) => void) {
     sendMessage(KEEPALIVE_MESSAGE);
   }, [sendMessage]);
 
+  const reportGamepadEvent = useCallback(
+    (state: GamepadState) => {
+      sendMessage(new GamepadReportMessage(state), {
+        useUnreliableChannel: true,
+        requireOrdered: false,
+      });
+    },
+    [sendMessage],
+  );
+
   useEffect(() => {
     if (!rpcHidChannel) return;
     if (hidRpcDisabled) return;
@@ -323,6 +335,7 @@ export function useHidRpc(onHidRpcMessage?: (payload: RpcMessage) => void) {
     reportKeyboardMacroEvent,
     cancelOngoingKeyboardMacro,
     reportKeypressKeepAlive,
+    reportGamepadEvent,
     rpcHidProtocolVersion,
     rpcHidReady,
     rpcHidStatus,

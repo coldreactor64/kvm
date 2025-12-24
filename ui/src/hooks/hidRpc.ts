@@ -10,6 +10,7 @@ export const HID_RPC_MESSAGE_TYPES = {
   MouseReport: 0x06,
   KeyboardMacroReport: 0x07,
   CancelKeyboardMacroReport: 0x08,
+  GamepadReport: 0x0a,
   KeyboardLedState: 0x32,
   KeysDownState: 0x33,
   KeyboardMacroState: 0x34,
@@ -400,6 +401,73 @@ export class KeypressKeepAliveMessage extends RpcMessage {
   }
 }
 
+export const GAMEPAD_BUTTONS = {
+  A: 1 << 0,
+  B: 1 << 1,
+  X: 1 << 2,
+  Y: 1 << 3,
+  LB: 1 << 4,
+  RB: 1 << 5,
+  Back: 1 << 6,
+  Start: 1 << 7,
+  L3: 1 << 8,
+  R3: 1 << 9,
+  Guide: 1 << 10,
+  DPadUp: 1 << 11,
+  DPadDown: 1 << 12,
+  DPadLeft: 1 << 13,
+  DPadRight: 1 << 14,
+} as const;
+
+export interface GamepadState {
+  leftStickX: number;
+  leftStickY: number;
+  rightStickX: number;
+  rightStickY: number;
+  leftTrigger: number;
+  rightTrigger: number;
+  buttons: number;
+}
+
+export class GamepadReportMessage extends RpcMessage {
+  state: GamepadState;
+
+  constructor(state: GamepadState) {
+    super(HID_RPC_MESSAGE_TYPES.GamepadReport);
+    this.state = state;
+  }
+
+  marshal(): Uint8Array {
+    return new Uint8Array([
+      this.messageType,
+      this.state.leftStickX & 0xff,
+      this.state.leftStickY & 0xff,
+      this.state.rightStickX & 0xff,
+      this.state.rightStickY & 0xff,
+      this.state.leftTrigger & 0xff,
+      this.state.rightTrigger & 0xff,
+      this.state.buttons & 0xff,
+      (this.state.buttons >> 8) & 0xff,
+    ]);
+  }
+
+  public static unmarshal(data: Uint8Array): GamepadReportMessage | undefined {
+    if (data.length < 8) {
+      throw new Error(`Invalid gamepad report message length: ${data.length}`);
+    }
+
+    return new GamepadReportMessage({
+      leftStickX: data[0],
+      leftStickY: data[1],
+      rightStickX: data[2],
+      rightStickY: data[3],
+      leftTrigger: data[4],
+      rightTrigger: data[5],
+      buttons: data[6] | (data[7] << 8),
+    });
+  }
+}
+
 export const messageRegistry = {
   [HID_RPC_MESSAGE_TYPES.Handshake]: HandshakeMessage,
   [HID_RPC_MESSAGE_TYPES.KeysDownState]: KeysDownStateMessage,
@@ -410,6 +478,7 @@ export const messageRegistry = {
   [HID_RPC_MESSAGE_TYPES.CancelKeyboardMacroReport]: CancelKeyboardMacroReportMessage,
   [HID_RPC_MESSAGE_TYPES.KeyboardMacroState]: KeyboardMacroStateMessage,
   [HID_RPC_MESSAGE_TYPES.KeypressKeepAliveReport]: KeypressKeepAliveMessage,
+  [HID_RPC_MESSAGE_TYPES.GamepadReport]: GamepadReportMessage,
 };
 
 export const unmarshalHidRpcMessage = (data: Uint8Array): RpcMessage | undefined => {

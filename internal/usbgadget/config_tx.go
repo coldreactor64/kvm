@@ -99,7 +99,9 @@ func (tx *UsbGadgetTransaction) removeFile(component string, path string, descri
 }
 
 func (tx *UsbGadgetTransaction) Commit() error {
-	tx.addFileChange("gadget-finalize", *tx.reorderSymlinkChanges)
+	if tx.reorderSymlinkChanges != nil {
+		tx.addFileChange("gadget-finalize", *tx.reorderSymlinkChanges)
+	}
 
 	err := tx.c.Apply()
 	if err != nil {

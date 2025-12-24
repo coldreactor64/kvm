@@ -168,6 +168,7 @@ var (
 		RelativeMouse: true,
 		Keyboard:      true,
 		MassStorage:   true,
+		Gamepad:       true,
 	}
 )
 

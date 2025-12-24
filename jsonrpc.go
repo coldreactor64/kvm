@@ -1007,6 +1007,8 @@ func rpcSetUsbDeviceState(device string, enabled bool) error {
 		config.UsbDevices.Keyboard = enabled
 	case "massStorage":
 		config.UsbDevices.MassStorage = enabled
+	case "gamepad":
+		config.UsbDevices.Gamepad = enabled
 	default:
 		return fmt.Errorf("invalid device: %s", device)
 	}

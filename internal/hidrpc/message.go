@@ -51,6 +51,13 @@ func (m *Message) String() string {
 			return fmt.Sprintf("KeyboardMacroReport{Malformed: %v}", m.d)
 		}
 		return fmt.Sprintf("KeyboardMacroReport{IsPaste: %v, Length: %d}", m.d[0] == uint8(1), binary.BigEndian.Uint32(m.d[1:5]))
+	case TypeGamepadReport:
+		if len(m.d) < 8 {
+			return fmt.Sprintf("GamepadReport{Malformed: %v}", m.d)
+		}
+		return fmt.Sprintf("GamepadReport{LX: %d, LY: %d, RX: %d, RY: %d, LT: %d, RT: %d, Buttons: %016b}",
+			m.d[0], m.d[1], m.d[2], m.d[3], m.d[4], m.d[5], uint16(m.d[6])|uint16(m.d[7])<<8)
+	
 	default:
 		return fmt.Sprintf("Unknown{Type: %d, Data: %v}", m.t, m.d)
 	}
@@ -203,5 +210,37 @@ func (m *Message) KeyboardMacroState() (KeyboardMacroState, error) {
 	return KeyboardMacroState{
 		State:   m.d[0] == uint8(1),
 		IsPaste: m.d[1] == uint8(1),
+	}, nil
+}
+
+//GamepadReport ..
+type GamepadReport struct {
+	LeftStickX   uint8  // 0-255, 128 = center
+	LeftStickY   uint8  // 0-255, 128 = center
+	RightStickX  uint8  // 0-255, 128 = center
+	RightStickY  uint8  // 0-255, 128 = center
+	LeftTrigger  uint8  // 0-255
+	RightTrigger uint8  // 0-255
+	Buttons      uint16 // 16 buttons as bitmask
+}
+
+// GamepadReport returns the gamepad report from the message.
+func (m *Message) GamepadReport() (GamepadReport, error) {
+	if m.t != TypeGamepadReport {
+		return GamepadReport{}, fmt.Errorf("invalid message type: %d", m.t)
+	}
+
+	if len(m.d) < 8 {
+		return GamepadReport{}, fmt.Errorf("invalid message length: %d, expected at least 8", len(m.d))
+	}
+
+	return GamepadReport{
+		LeftStickX:   m.d[0],
+		LeftStickY:   m.d[1],
+		RightStickX:  m.d[2],
+		RightStickY:  m.d[3],
+		LeftTrigger:  m.d[4],
+		RightTrigger: m.d[5],
+		Buttons:      uint16(m.d[6]) | uint16(m.d[7])<<8,
 	}, nil
 }

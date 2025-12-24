@@ -19,6 +19,7 @@ type Devices struct {
 	RelativeMouse bool `json:"relative_mouse"`
 	Keyboard      bool `json:"keyboard"`
 	MassStorage   bool `json:"mass_storage"`
+	Gamepad       bool `json:"gamepad"`
 }
 
 // Config is a struct that represents the customizations for a USB gadget.
@@ -39,6 +40,7 @@ var defaultUsbGadgetDevices = Devices{
 	RelativeMouse: true,
 	Keyboard:      true,
 	MassStorage:   true,
+	Gamepad:       true,
 }
 
 type KeysDownState struct {
@@ -64,6 +66,8 @@ type UsbGadget struct {
 	absMouseLock    sync.Mutex
 	relMouseHidFile *os.File
 	relMouseLock    sync.Mutex
+	gamepadHidFile  *os.File
+	gamepadLock     sync.Mutex
 
 	keyboardState byte          // keyboard latched state (NumLock, CapsLock, ScrollLock, Compose, Kana)
 	keysDownState KeysDownState // keyboard dynamic state (modifier keys and pressed keys)
@@ -184,6 +188,10 @@ func (u *UsbGadget) Close() error {
 	if u.relMouseHidFile != nil {
 		u.relMouseHidFile.Close()
 		u.relMouseHidFile = nil
+	}
+	if u.gamepadHidFile != nil {
+		u.gamepadHidFile.Close()
+		u.gamepadHidFile = nil
 	}
 
 	return nil

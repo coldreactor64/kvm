@@ -54,6 +54,19 @@ func handleHidRPCMessage(message hidrpc.Message, session *Session) {
 			return
 		}
 		rpcErr = rpcRelMouseReport(mouseReport.DX, mouseReport.DY, mouseReport.Button)
+	case hidrpc.TypeGamepadReport:
+		gamepadReport, err := message.GamepadReport()
+		if err != nil {
+			logger.Warn().Err(err).Msg("failed to get gamepad report")
+			return
+		}
+
+		rpcErr = rpcGamepadReport(
+			gamepadReport.LeftStickX, gamepadReport.LeftStickY,
+			gamepadReport.RightStickX, gamepadReport.RightStickY,
+			gamepadReport.LeftTrigger, gamepadReport.RightTrigger,
+			gamepadReport.Buttons,
+		)	
 	default:
 		logger.Warn().Uint8("type", uint8(message.Type())).Msg("unknown HID RPC message type")
 	}

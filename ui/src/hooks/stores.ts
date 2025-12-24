@@ -369,6 +369,9 @@ export interface SettingsState {
 
   videoContrast: number;
   setVideoContrast: (value: number) => void;
+
+  gamepadEnabled: boolean;
+  setGamepadEnabled: (enabled: boolean) => void;
 }
 
 export const useSettingsStore = create(
@@ -415,6 +418,9 @@ export const useSettingsStore = create(
 
       videoContrast: 1.0,
       setVideoContrast: (value: number) => set({ videoContrast: value }),
+
+      gamepadEnabled: false,
+      setGamepadEnabled: (enabled: boolean) => set({ gamepadEnabled: enabled }),
     }),
     {
       name: "settings",

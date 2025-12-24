@@ -49,6 +49,19 @@ func initUsbGadget() {
 		usbLogger.Error().Err(err).Msg("failed to open keyboard hid file")
 	}
 }
+func rpcGamepadReport(
+	leftStickX, leftStickY uint8,
+	rightStickX, rightStickY uint8,
+	leftTrigger, rightTrigger uint8,
+	buttons uint16,
+) error {
+	return gadget.GamepadReportRaw(
+		leftStickX, leftStickY,
+		rightStickX, rightStickY,
+		leftTrigger, rightTrigger,
+		buttons,
+	)
+}
 
 func rpcKeyboardReport(modifier byte, keys []byte) error {
 	return gadget.KeyboardReport(modifier, keys)

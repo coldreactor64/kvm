@@ -56,6 +56,8 @@ var defaultGadgetConfig = map[string]gadgetConfigItem{
 	"absolute_mouse": absoluteMouseConfig,
 	// relative mouse HID
 	"relative_mouse": relativeMouseConfig,
+	//gamepad HID
+	"gamepad": gamepadConfig,
 	// mass storage
 	"mass_storage_base": massStorageBaseConfig,
 	"mass_storage_lun0": massStorageLun0Config,
@@ -73,6 +75,8 @@ func (u *UsbGadget) isGadgetConfigItemEnabled(itemKey string) bool {
 		return u.enabledDevices.MassStorage
 	case "mass_storage_lun0":
 		return u.enabledDevices.MassStorage
+	case "gamepad":
+		return u.enabledDevices.Gamepad
 	default:
 		return true
 	}
