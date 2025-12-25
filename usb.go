@@ -8,6 +8,8 @@ import (
 )
 
 var gadget *usbgadget.UsbGadget
+var gamepadEnableLock sync.Mutex
+var gamepadEnableAttempted bool
 
 // initUsbGadget initializes the USB gadget.
 // call it only after the config is loaded.
@@ -55,6 +57,21 @@ func rpcGamepadReport(
 	leftTrigger, rightTrigger uint8,
 	buttons uint16,
 ) error {
+	if config != nil && config.UsbDevices != nil && !config.UsbDevices.Gamepad {
+		gamepadEnableLock.Lock()
+		shouldAttempt := !gamepadEnableAttempted
+		gamepadEnableAttempted = true
+		gamepadEnableLock.Unlock()
+
+		if shouldAttempt {
+			if err := rpcSetUsbDeviceState("gamepad", true); err != nil {
+				gamepadEnableLock.Lock()
+				gamepadEnableAttempted = false
+				gamepadEnableLock.Unlock()
+				return err
+			}
+		}
+	}
 	return gadget.GamepadReportRaw(
 		leftStickX, leftStickY,
 		rightStickX, rightStickY,
