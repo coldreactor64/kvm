@@ -1,0 +1,37 @@
+//go:build !linux || (!arm && !arm64)
+
+package audio
+
+// Stub implementations for non-ARM Linux platforms
+
+type CgoSource struct{}
+
+var _ AudioSource = (*CgoSource)(nil)
+
+func NewCgoOutputSource(alsaDevice string, audioConfig AudioConfig) AudioSource {
+	panic("audio CGO source not supported on this platform")
+}
+
+func NewCgoInputSource(alsaDevice string, audioConfig AudioConfig) AudioSource {
+	panic("audio CGO source not supported on this platform")
+}
+
+func (c *CgoSource) Connect() error {
+	panic("audio CGO source not supported on this platform")
+}
+
+func (c *CgoSource) Disconnect() {
+	panic("audio CGO source not supported on this platform")
+}
+
+func (c *CgoSource) IsConnected() bool {
+	panic("audio CGO source not supported on this platform")
+}
+
+func (c *CgoSource) ReadMessage() (uint8, []byte, error) {
+	panic("audio CGO source not supported on this platform")
+}
+
+func (c *CgoSource) WriteMessage(msgType uint8, payload []byte) error {
+	panic("audio CGO source not supported on this platform")
+}

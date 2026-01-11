@@ -20,6 +20,17 @@ type Devices struct {
 	Keyboard      bool `json:"keyboard"`
 	MassStorage   bool `json:"mass_storage"`
 	Gamepad       bool `json:"gamepad"`
+	Audio         bool `json:"audio"`
+}
+
+// Equals checks if two Devices structs are equal.
+func (d Devices) Equals(other Devices) bool {
+	return d.AbsoluteMouse == other.AbsoluteMouse &&
+		d.RelativeMouse == other.RelativeMouse &&
+		d.Keyboard == other.Keyboard &&
+		d.MassStorage == other.MassStorage &&
+		d.Gamepad == other.Gamepad &&
+		d.Audio == other.Audio
 }
 
 // Config is a struct that represents the customizations for a USB gadget.
@@ -40,7 +51,8 @@ var defaultUsbGadgetDevices = Devices{
 	RelativeMouse: true,
 	Keyboard:      true,
 	MassStorage:   true,
-	Gamepad:       true,
+	Gamepad:       false,
+	Audio:         true,
 }
 
 type KeysDownState struct {
@@ -195,4 +207,53 @@ func (u *UsbGadget) Close() error {
 	}
 
 	return nil
+}
+
+// CloseHidFiles closes all open HID files
+func (u *UsbGadget) CloseHidFiles() {
+	u.log.Debug().Msg("closing HID files")
+
+	closeFile := func(file **os.File, name string) {
+		if *file != nil {
+			if err := (*file).Close(); err != nil {
+				u.log.Debug().Err(err).Msgf("failed to close %s HID file", name)
+			}
+			*file = nil
+		}
+	}
+
+	closeFile(&u.keyboardHidFile, "keyboard")
+	closeFile(&u.absMouseHidFile, "absolute mouse")
+	closeFile(&u.relMouseHidFile, "relative mouse")
+}
+
+// PreOpenHidFiles opens all HID files to reduce input latency
+func (u *UsbGadget) PreOpenHidFiles() {
+	// Small delay for USB gadget reconfiguration to complete
+	time.Sleep(100 * time.Millisecond)
+
+	openHidFile := func(file **os.File, path string, name string) {
+		if *file == nil {
+			f, err := os.OpenFile(path, os.O_RDWR, 0666)
+			if err != nil {
+				u.log.Debug().Err(err).Msgf("failed to pre-open %s HID file", name)
+			} else {
+				*file = f
+			}
+		}
+	}
+
+	if u.enabledDevices.Keyboard {
+		if err := u.openKeyboardHidFile(); err != nil {
+			u.log.Debug().Err(err).Msg("failed to pre-open keyboard HID file")
+		}
+	}
+
+	if u.enabledDevices.AbsoluteMouse {
+		openHidFile(&u.absMouseHidFile, "/dev/hidg1", "absolute mouse")
+	}
+
+	if u.enabledDevices.RelativeMouse {
+		openHidFile(&u.relMouseHidFile, "/dev/hidg2", "relative mouse")
+	}
 }

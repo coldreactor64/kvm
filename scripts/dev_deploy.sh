@@ -197,6 +197,11 @@ EOF
     exit 0
 fi
 
+# Always clear Go build caches to prevent stale CGO builds
+msg_info "▶ Clearing Go build caches"
+go clean -cache -modcache -testcache -fuzzcache
+msg_info "✓ Build caches cleared"
+
 # Build the development version on the host
 # When using `make build_release`, the frontend will be built regardless of the `SKIP_UI_BUILD` flag
 # check if static/index.html exists
@@ -261,18 +266,20 @@ fi
 if [ "$INSTALL_APP" = true ]
 then
 	msg_info "▶ Building release binary"
+	# Build audio dependencies and release binary
+	do_make build_audio_deps
 	do_make build_release \
     SKIP_NATIVE_IF_EXISTS=${SKIP_NATIVE_BUILD} \
     SKIP_UI_BUILD=${SKIP_UI_BUILD_RELEASE} \
     ENABLE_SYNC_TRACE=${ENABLE_SYNC_TRACE}
 
-	# Copy the binary to the remote host as if we were the OTA updater.
+	# Deploy as OTA update and reboot
 	sshdev "cat > /userdata/jetkvm/jetkvm_app.update" < bin/jetkvm_app
-
-	# Reboot the device, the new app will be deployed by the startup process.
 	sshdev "reboot"
 else
 	msg_info "▶ Building development binary"
+	# Build audio dependencies and development binary
+	do_make build_audio_deps
 	do_make build_dev \
     SKIP_NATIVE_IF_EXISTS=${SKIP_NATIVE_BUILD} \
     SKIP_UI_BUILD=${SKIP_UI_BUILD_RELEASE} \

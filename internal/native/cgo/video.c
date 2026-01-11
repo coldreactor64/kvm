@@ -771,9 +771,10 @@ void video_restart_streaming()
     uint8_t streaming_status = video_get_streaming_status();
     // 0 = stopped, 1 = running, 2 = stopping
 
-    if (streaming_status == 0)
-    {
-        log_info("will not restart video streaming because it's stopped");
+    // If stopped and no signal detected, don't restart
+    // But if signal is present, allow restart even when stopped (needed for audio sync)
+    if (streaming_status == 0 && !detected_signal) {
+        log_info("will not restart video streaming because it's stopped and no signal detected");
         return;
     }
 
@@ -804,7 +805,6 @@ void *run_detect_format(void *arg)
 
     while (!should_exit)
     {
-        ensure_sleep_mode_disabled();
 
         memset(&dv_timings, 0, sizeof(dv_timings));
         if (ioctl(sub_dev_fd, VIDIOC_QUERY_DV_TIMINGS, &dv_timings) != 0)

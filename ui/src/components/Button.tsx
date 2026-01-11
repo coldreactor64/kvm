@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components */
 import React, { JSX } from "react";
 import { Link, type FetcherWithComponents, type LinkProps, useNavigation } from "react-router";
 
@@ -162,6 +163,7 @@ type ButtonPropsType = Pick<
   | "onMouseDown"
   | "onMouseUp"
   | "onMouseLeave"
+  | "data-testid"
 > &
   React.ComponentProps<typeof ButtonContent> & {
     fetcher?: FetcherWithComponents<unknown>;
@@ -189,6 +191,7 @@ export const Button = React.forwardRef<HTMLButtonElement, ButtonPropsType>(
         onMouseLeave={props?.onMouseLeave}
         name={props.name}
         value={props.value}
+        data-testid={props["data-testid"]}
       >
         <ButtonContent
           {...props}
@@ -206,7 +209,7 @@ export const Button = React.forwardRef<HTMLButtonElement, ButtonPropsType>(
 
 Button.displayName = "Button";
 
-type LinkPropsType = Pick<LinkProps, "to" | "target" | "reloadDocument"> &
+type LinkPropsType = Pick<LinkProps, "to" | "target" | "reloadDocument" | "download"> &
   React.ComponentProps<typeof ButtonContent> & { disabled?: boolean };
 export const LinkButton = ({ to, ...props }: LinkPropsType) => {
   const classes = cx(

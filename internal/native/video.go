@@ -8,8 +8,7 @@ import (
 
 const sleepModeFile = "/sys/devices/platform/ff470000.i2c/i2c-4/4-000f/sleep_mode"
 
-// DefaultEDID is the default EDID for the video stream.
-const DefaultEDID = "00ffffffffffff0052620188008888881c150103800000780a0dc9a05747982712484c00000001010101010101010101010101010101023a801871382d40582c4500c48e2100001e011d007251d01e206e285500c48e2100001e000000fc00543734392d6648443732300a20000000fd00147801ff1d000a202020202020017b"
+const DefaultEDID = "00ffffffffffff0028b4010001eeffc0302301038047287856ee91a3544c99260f5054000000d1c081c0318001010101010101010101023a801871382d40582c4500c48e2100001e011d007251d01e206e285500c48e2100001e000000fd00174c0f5111000a202020202020000000fc004a65744b564d2076310a202020011d020322d1431004012309070783010000e200cfe40d100401e305000065030c001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000cf"
 
 var extraLockTimeout = 5 * time.Second
 
@@ -153,10 +152,6 @@ func (n *Native) VideoSetEDID(edid string) error {
 	n.videoLock.Lock()
 	defer n.videoLock.Unlock()
 
-	if edid == "" {
-		edid = DefaultEDID
-	}
-
 	return n.useExtraLock(func() error {
 		return videoSetEDID(edid)
 	})
@@ -168,6 +163,11 @@ func (n *Native) VideoGetEDID() (string, error) {
 	defer n.videoLock.Unlock()
 
 	return videoGetEDID()
+}
+
+// GetDefaultEDID returns the default EDID constant.
+func (n *Native) GetDefaultEDID() string {
+	return DefaultEDID
 }
 
 // VideoLogStatus gets the log status for the video stream.

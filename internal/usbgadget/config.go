@@ -61,6 +61,23 @@ var defaultGadgetConfig = map[string]gadgetConfigItem{
 	// mass storage
 	"mass_storage_base": massStorageBaseConfig,
 	"mass_storage_lun0": massStorageLun0Config,
+	// audio (UAC1 - USB Audio Class 1)
+	"audio": {
+		order:      4000,
+		device:     "uac1.usb0",
+		path:       []string{"functions", "uac1.usb0"},
+		configPath: []string{"uac1.usb0"},
+		attrs: gadgetAttributes{
+			"p_chmask":         "4",     // Playback: mono (Center Front - USB Audio Class recommended position for mono)
+			"p_srate":          "48000", // Playback: 48kHz sample rate
+			"p_ssize":          "2",     // Playback: 16-bit (2 bytes)
+			"p_volume_present": "1",     // Playback: enable volume control
+			"c_chmask":         "3",     // Capture: stereo (2 channels for HDMI audio)
+			"c_srate":          "48000", // Capture: 48kHz sample rate
+			"c_ssize":          "2",     // Capture: 16-bit (2 bytes)
+			"c_volume_present": "0",     // Capture: no volume control
+		},
+	},
 }
 
 func (u *UsbGadget) isGadgetConfigItemEnabled(itemKey string) bool {
@@ -77,6 +94,8 @@ func (u *UsbGadget) isGadgetConfigItemEnabled(itemKey string) bool {
 		return u.enabledDevices.MassStorage
 	case "gamepad":
 		return u.enabledDevices.Gamepad
+	case "audio":
+		return u.enabledDevices.Audio
 	default:
 		return true
 	}
@@ -117,6 +136,13 @@ func (u *UsbGadget) SetGadgetDevices(devices *Devices) {
 	}
 
 	u.enabledDevices = *devices
+}
+
+func (u *UsbGadget) GetGadgetDevices() Devices {
+	u.configLock.Lock()
+	defer u.configLock.Unlock()
+
+	return u.enabledDevices
 }
 
 // GetConfigPath returns the path to the config item.
@@ -186,6 +212,9 @@ func (u *UsbGadget) Init() error {
 		return u.logError("unable to initialize USB stack", err)
 	}
 
+	// Pre-open HID files to reduce input latency
+	u.PreOpenHidFiles()
+
 	return nil
 }
 
@@ -195,10 +224,16 @@ func (u *UsbGadget) UpdateGadgetConfig() error {
 
 	u.loadGadgetConfig()
 
+	// Close HID files before reconfiguration to prevent "file already closed" errors
+	u.CloseHidFiles()
+
 	err := u.configureUsbGadget(true)
 	if err != nil {
 		return u.logError("unable to update gadget config", err)
 	}
+
+	// Reopen HID files after reconfiguration
+	u.PreOpenHidFiles()
 
 	return nil
 }

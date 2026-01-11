@@ -10,10 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
-	"regexp"
-	"sort"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -21,23 +18,11 @@ import (
 	"github.com/rs/zerolog"
 	"go.bug.st/serial"
 
-	"github.com/jetkvm/kvm/internal/diagnostics"
 	"github.com/jetkvm/kvm/internal/hidrpc"
-	"github.com/jetkvm/kvm/internal/supervisor"
+	"github.com/jetkvm/kvm/internal/native"
 	"github.com/jetkvm/kvm/internal/usbgadget"
 	"github.com/jetkvm/kvm/internal/utils"
 )
-
-// ansiRegex matches ANSI escape sequences for stripping from log output
-var ansiRegex = regexp.MustCompile(`[\x1b\x9b][[\]()#;?]*(?:(?:(?:[a-zA-Z\d]*(?:;[a-zA-Z\d]*)*)?\x07)|(?:(?:\d{1,4}(?:;\d{0,4})*)?[\dA-PRZcf-ntqry=><~]))`)
-
-// cleanLogOutput strips ANSI codes and unescapes newlines/tabs for readable output
-func cleanLogOutput(s string) string {
-	s = ansiRegex.ReplaceAllString(s, "")
-	s = strings.ReplaceAll(s, "\\n", "\n")
-	s = strings.ReplaceAll(s, "\\t", "\t")
-	return s
-}
 
 type JSONRPCRequest struct {
 	JSONRPC string         `json:"jsonrpc"`
@@ -139,7 +124,6 @@ func onRPCMessage(message webrtc.DataChannelMessage, session *Session) {
 		Interface("id", request.ID).Logger()
 
 	scopedLogger.Trace().Msg("Received RPC request")
-	t := time.Now()
 
 	handler, ok := rpcHandlers[request.Method]
 	if !ok {
@@ -171,7 +155,7 @@ func onRPCMessage(message webrtc.DataChannelMessage, session *Session) {
 		return
 	}
 
-	scopedLogger.Trace().Dur("duration", time.Since(t)).Interface("result", result).Msg("RPC handler returned")
+	scopedLogger.Trace().Interface("result", result).Msg("RPC handler returned")
 
 	response := JSONRPCResponse{
 		JSONRPC: "2.0",
@@ -225,15 +209,16 @@ func rpcSetAutoUpdateState(enabled bool) (bool, error) {
 }
 
 func rpcGetEDID() (string, error) {
-	resp, err := nativeInstance.VideoGetEDID()
-	if err != nil {
-		return "", err
-	}
-	return resp, nil
+	return config.EdidString, nil
+}
+
+func rpcGetDefaultEDID() (string, error) {
+	return native.DefaultEDID, nil
 }
 
 func rpcSetEDID(edid string) error {
 	if edid == "" {
+		edid = native.DefaultEDID
 		logger.Info().Msg("Restoring EDID to default")
 	} else {
 		logger.Info().Str("edid", edid).Msg("Setting EDID")
@@ -243,10 +228,24 @@ func rpcSetEDID(edid string) error {
 		return err
 	}
 
-	// Save EDID to config, allowing it to be restored on reboot.
 	config.EdidString = edid
-	_ = SaveConfig()
+	if err := SaveConfig(); err != nil {
+		logger.Error().Err(err).Msg("Failed to save config after EDID change")
+		return err
+	}
 	return nil
+}
+
+func rpcRefreshHdmiConnection() error {
+	currentEDID, err := nativeInstance.VideoGetEDID()
+	if err != nil {
+		return err
+	}
+	if currentEDID == "" {
+		// Use the default EDID from the native package
+		currentEDID = native.DefaultEDID
+	}
+	return nativeInstance.VideoSetEDID(currentEDID)
 }
 
 func rpcGetVideoLogStatus() (string, error) {
@@ -452,7 +451,7 @@ type RPCHandler struct {
 	Params []string
 }
 
-// call the handler but recover from a panic to ensure our RPC thread doesn't collapse on malformed calls
+// call the handler but recover from a panic to ensure our RPC goroutine doesn't collapse on malformed calls
 func callRPCHandler(logger zerolog.Logger, handler RPCHandler, params map[string]any) (result any, err error) {
 	// Use defer to recover from a panic
 	defer func() {
@@ -622,6 +621,9 @@ func rpcGetMassStorageMode() (string, error) {
 }
 
 func rpcIsUpdatePending() (bool, error) {
+	if otaState == nil {
+		return false, nil
+	}
 	return otaState.IsUpdatePending(), nil
 }
 
@@ -644,9 +646,12 @@ func rpcGetUsbConfig() (usbgadget.Config, error) {
 
 func rpcSetUsbConfig(usbConfig usbgadget.Config) error {
 	LoadConfig()
+	wasUsbAudioEnabled := config.UsbDevices != nil && config.UsbDevices.Audio
+
 	config.UsbConfig = &usbConfig
 	gadget.SetGadgetConfig(config.UsbConfig)
-	return updateUsbRelatedConfig()
+
+	return updateUsbRelatedConfig(wasUsbAudioEnabled)
 }
 
 func rpcGetWakeOnLanDevices() ([]WakeOnLanDevice, error) {
@@ -674,129 +679,6 @@ func rpcResetConfig() error {
 
 	logger.Info().Msg("Configuration reset to default")
 	return nil
-}
-
-func rpcGetDiagnostics() (string, error) {
-	var sb strings.Builder
-
-	// Section 1: Application log (last.log) - last 500 lines
-	sb.WriteString("=== APPLICATION LOG ===\n")
-	if data, err := os.ReadFile(supervisor.AppLogPath); err == nil {
-		content := cleanLogOutput(string(data))
-		lines := strings.Split(content, "\n")
-		if len(lines) > 500 {
-			content = "... (truncated, showing last 500 lines)\n" + strings.Join(lines[len(lines)-500:], "\n")
-		}
-		sb.WriteString(content)
-	} else {
-		sb.WriteString(fmt.Sprintf("Error reading log: %v\n", err))
-	}
-	sb.WriteString("\n\n")
-
-	// Collect diagnostics to a buffer (not to last.log)
-	var diagBuf strings.Builder
-	diag := diagnostics.New(diagnostics.Options{
-		Writer: &diagBuf,
-		GetSessionInfo: func() diagnostics.SessionInfo {
-			info := diagnostics.SessionInfo{
-				ActiveSessions:    getActiveSessions(),
-				HasCurrentSession: currentSession != nil,
-			}
-			if currentSession != nil {
-				sessionInfo := currentSession.GetDiagnosticsInfo()
-				info.ICEConnectionState = sessionInfo.ICEConnectionState
-				info.SignalingState = sessionInfo.SignalingState
-				info.ConnectionState = sessionInfo.ConnectionState
-				info.DataChannels = sessionInfo.DataChannels
-			}
-			return info
-		},
-	})
-	diag.LogAll("download")
-
-	// Section 2: System diagnostics
-	sb.WriteString("=== SYSTEM DIAGNOSTICS ===\n")
-	sb.WriteString(diagBuf.String())
-	sb.WriteString("\n")
-
-	// Section 3: Last crash log
-	lastCrashPath := filepath.Join(supervisor.ErrorDumpDir, supervisor.ErrorDumpLastFile)
-	sb.WriteString("=== LAST CRASH LOG ===\n")
-	if data, err := os.ReadFile(lastCrashPath); err == nil {
-		sb.WriteString(cleanLogOutput(string(data)))
-	} else {
-		sb.WriteString(fmt.Sprintf("No crash log found: %v\n", err))
-	}
-	sb.WriteString("\n\n")
-
-	// Section 4: Recent crash dumps (excluding last-crash.log)
-	sb.WriteString("=== RECENT CRASH DUMPS ===\n")
-	if entries, err := os.ReadDir(supervisor.ErrorDumpDir); err == nil {
-		type fileInfo struct {
-			name    string
-			modTime time.Time
-		}
-		var crashFiles []fileInfo
-		for _, entry := range entries {
-			if entry.IsDir() || entry.Name() == supervisor.ErrorDumpLastFile {
-				continue
-			}
-			// Match jetkvm-*.log pattern
-			if !strings.HasPrefix(entry.Name(), "jetkvm-") || !strings.HasSuffix(entry.Name(), ".log") {
-				continue
-			}
-			info, err := entry.Info()
-			if err != nil {
-				continue
-			}
-			crashFiles = append(crashFiles, fileInfo{name: entry.Name(), modTime: info.ModTime()})
-		}
-		// Sort by modification time (newest first)
-		sort.Slice(crashFiles, func(i, j int) bool {
-			return crashFiles[i].modTime.After(crashFiles[j].modTime)
-		})
-
-		// Take 12 most recent crash dumps
-		if len(crashFiles) > 12 {
-			crashFiles = crashFiles[:12]
-		}
-
-		for i, cf := range crashFiles {
-			sb.WriteString(fmt.Sprintf("--- %s ---\n", cf.name))
-			crashPath := filepath.Join(supervisor.ErrorDumpDir, cf.name)
-			if data, err := os.ReadFile(crashPath); err == nil {
-				content := cleanLogOutput(string(data))
-				// First file is full, rest are last 50 lines
-				if i > 0 {
-					lines := strings.Split(content, "\n")
-					if len(lines) > 100 {
-						content = "... (truncated)\n" + strings.Join(lines[len(lines)-50:], "\n")
-					}
-				}
-				sb.WriteString(content)
-			} else {
-				sb.WriteString(fmt.Sprintf("Error reading: %v\n", err))
-			}
-			sb.WriteString("\n")
-		}
-		if len(crashFiles) == 0 {
-			sb.WriteString("No crash dumps found\n")
-		}
-	} else {
-		sb.WriteString(fmt.Sprintf("Error reading crash directory: %v\n", err))
-	}
-	sb.WriteString("\n")
-
-	// Section 5: Configuration
-	sb.WriteString("=== CONFIGURATION ===\n")
-	if data, err := os.ReadFile(configPath); err == nil {
-		sb.WriteString(string(data))
-	} else {
-		sb.WriteString(fmt.Sprintf("Error reading config: %v\n", err))
-	}
-	sb.WriteString("\n")
-
-	return sb.String(), nil
 }
 
 type DCPowerState struct {
@@ -981,23 +863,50 @@ func rpcGetUsbDevices() (usbgadget.Devices, error) {
 	return *config.UsbDevices, nil
 }
 
-func updateUsbRelatedConfig() error {
+func updateUsbRelatedConfig(wasUsbAudioEnabled bool) error {
+	ensureConfigLoaded()
+
+	// Stop input audio before reconfiguring USB gadget (output always uses HDMI)
+	stopInputAudio()
+
+	// Update USB gadget configuration
 	if err := gadget.UpdateGadgetConfig(); err != nil {
-		return fmt.Errorf("failed to write gadget config: %w", err)
+		return fmt.Errorf("failed to update gadget config: %w", err)
 	}
+
+	// Save configuration
 	if err := SaveConfig(); err != nil {
 		return fmt.Errorf("failed to save config: %w", err)
 	}
+
+	// Restart audio if needed
+	if err := startAudio(); err != nil {
+		logger.Warn().Err(err).Msg("Failed to restart audio after USB reconfiguration")
+	}
+
 	return nil
 }
 
 func rpcSetUsbDevices(usbDevices usbgadget.Devices) error {
+	wasUsbAudioEnabled := config.UsbDevices != nil && config.UsbDevices.Audio
+	currentDevices := gadget.GetGadgetDevices()
+
+	// Skip reconfiguration if devices haven't changed to avoid HID disruption
+	if currentDevices.Equals(usbDevices) {
+		logger.Debug().Msg("USB devices unchanged, skipping gadget reconfiguration")
+		return nil
+	}
+
 	config.UsbDevices = &usbDevices
 	gadget.SetGadgetDevices(config.UsbDevices)
-	return updateUsbRelatedConfig()
+
+	return updateUsbRelatedConfig(wasUsbAudioEnabled)
 }
 
 func rpcSetUsbDeviceState(device string, enabled bool) error {
+	wasUsbAudioEnabled := config.UsbDevices != nil && config.UsbDevices.Audio
+	currentDevices := gadget.GetGadgetDevices()
+
 	switch device {
 	case "absoluteMouse":
 		config.UsbDevices.AbsoluteMouse = enabled
@@ -1009,11 +918,105 @@ func rpcSetUsbDeviceState(device string, enabled bool) error {
 		config.UsbDevices.MassStorage = enabled
 	case "gamepad":
 		config.UsbDevices.Gamepad = enabled
+	case "audio":
+		config.UsbDevices.Audio = enabled
 	default:
 		return fmt.Errorf("invalid device: %s", device)
 	}
+
+	// Skip reconfiguration if devices haven't changed to avoid HID disruption
+	if currentDevices.Equals(*config.UsbDevices) {
+		logger.Debug().Msg("USB device state unchanged, skipping gadget reconfiguration")
+		return nil
+	}
+
 	gadget.SetGadgetDevices(config.UsbDevices)
-	return updateUsbRelatedConfig()
+	return updateUsbRelatedConfig(wasUsbAudioEnabled)
+}
+
+func rpcGetAudioOutputEnabled() (bool, error) {
+	ensureConfigLoaded()
+	return config.AudioOutputEnabled, nil
+}
+
+func rpcSetAudioOutputEnabled(enabled bool) error {
+	ensureConfigLoaded()
+	config.AudioOutputEnabled = enabled
+	if err := SaveConfig(); err != nil {
+		return err
+	}
+	return SetAudioOutputEnabled(enabled)
+}
+
+func rpcGetAudioInputEnabled() (bool, error) {
+	return audioInputEnabled.Load(), nil
+}
+
+func rpcSetAudioInputEnabled(enabled bool) error {
+	return SetAudioInputEnabled(enabled)
+}
+
+type AudioConfigResponse struct {
+	Bitrate        int  `json:"bitrate"`
+	Complexity     int  `json:"complexity"`
+	DTXEnabled     bool `json:"dtx_enabled"`
+	FECEnabled     bool `json:"fec_enabled"`
+	BufferPeriods  int  `json:"buffer_periods"`
+	PacketLossPerc int  `json:"packet_loss_perc"`
+}
+
+func rpcGetAudioConfig() (AudioConfigResponse, error) {
+	ensureConfigLoaded()
+	cfg := getAudioConfig()
+	return AudioConfigResponse{
+		Bitrate:        int(cfg.Bitrate),
+		Complexity:     int(cfg.Complexity),
+		DTXEnabled:     cfg.DTXEnabled,
+		FECEnabled:     cfg.FECEnabled,
+		BufferPeriods:  int(cfg.BufferPeriods),
+		PacketLossPerc: int(cfg.PacketLossPerc),
+	}, nil
+}
+
+func rpcSetAudioConfig(bitrate int, complexity int, dtxEnabled bool, fecEnabled bool, bufferPeriods int, packetLossPerc int) error {
+	ensureConfigLoaded()
+
+	if bitrate < 64 || bitrate > 256 {
+		return fmt.Errorf("bitrate must be between 64 and 256 kbps")
+	}
+	if complexity < 0 || complexity > 10 {
+		return fmt.Errorf("complexity must be between 0 and 10")
+	}
+	if bufferPeriods < 2 || bufferPeriods > 24 {
+		return fmt.Errorf("buffer periods must be between 2 and 24")
+	}
+	if packetLossPerc < 0 || packetLossPerc > 100 {
+		return fmt.Errorf("packet loss percentage must be between 0 and 100")
+	}
+
+	config.AudioBitrate = bitrate
+	config.AudioComplexity = complexity
+	config.AudioDTXEnabled = dtxEnabled
+	config.AudioFECEnabled = fecEnabled
+	config.AudioBufferPeriods = bufferPeriods
+	config.AudioPacketLossPerc = packetLossPerc
+
+	return SaveConfig()
+}
+
+func rpcRestartAudioOutput() error {
+	return RestartAudioOutput()
+}
+
+func rpcGetAudioInputAutoEnable() (bool, error) {
+	ensureConfigLoaded()
+	return config.AudioInputAutoEnable, nil
+}
+
+func rpcSetAudioInputAutoEnable(enabled bool) error {
+	ensureConfigLoaded()
+	config.AudioInputAutoEnable = enabled
+	return SaveConfig()
 }
 
 func rpcSetCloudUrl(apiUrl string, appUrl string) error {
@@ -1258,97 +1261,107 @@ func rpcDoExecuteKeyboardMacro(ctx context.Context, macro []hidrpc.KeyboardMacro
 }
 
 var rpcHandlers = map[string]RPCHandler{
-	"ping":                   {Func: rpcPing},
-	"reboot":                 {Func: rpcReboot, Params: []string{"force"}},
-	"getDeviceID":            {Func: rpcGetDeviceID},
-	"deregisterDevice":       {Func: rpcDeregisterDevice},
-	"getCloudState":          {Func: rpcGetCloudState},
-	"getNetworkState":        {Func: rpcGetNetworkState},
-	"getNetworkSettings":     {Func: rpcGetNetworkSettings},
-	"setNetworkSettings":     {Func: rpcSetNetworkSettings, Params: []string{"settings"}},
-	"renewDHCPLease":         {Func: rpcRenewDHCPLease},
-	"getKeyboardLedState":    {Func: rpcGetKeyboardLedState},
-	"getKeyDownState":        {Func: rpcGetKeysDownState},
-	"keyboardReport":         {Func: rpcKeyboardReport, Params: []string{"modifier", "keys"}},
-	"keypressReport":         {Func: rpcKeypressReport, Params: []string{"key", "press"}},
-	"absMouseReport":         {Func: rpcAbsMouseReport, Params: []string{"x", "y", "buttons"}},
-	"relMouseReport":         {Func: rpcRelMouseReport, Params: []string{"dx", "dy", "buttons"}},
-	"wheelReport":            {Func: rpcWheelReport, Params: []string{"wheelY"}},
-	"getVideoState":          {Func: rpcGetVideoState},
-	"getUSBState":            {Func: rpcGetUSBState},
-	"unmountImage":           {Func: rpcUnmountImage},
-	"rpcMountBuiltInImage":   {Func: rpcMountBuiltInImage, Params: []string{"filename"}},
-	"setJigglerState":        {Func: rpcSetJigglerState, Params: []string{"enabled"}},
-	"getJigglerState":        {Func: rpcGetJigglerState},
-	"setJigglerConfig":       {Func: rpcSetJigglerConfig, Params: []string{"jigglerConfig"}},
-	"getJigglerConfig":       {Func: rpcGetJigglerConfig},
-	"getTimezones":           {Func: rpcGetTimezones},
-	"sendWOLMagicPacket":     {Func: rpcSendWOLMagicPacket, Params: []string{"macAddress"}},
-	"getStreamQualityFactor": {Func: rpcGetStreamQualityFactor},
-	"setStreamQualityFactor": {Func: rpcSetStreamQualityFactor, Params: []string{"factor"}},
-	"getAutoUpdateState":     {Func: rpcGetAutoUpdateState},
-	"setAutoUpdateState":     {Func: rpcSetAutoUpdateState, Params: []string{"enabled"}},
-	"getEDID":                {Func: rpcGetEDID},
-	"setEDID":                {Func: rpcSetEDID, Params: []string{"edid"}},
-	"getVideoLogStatus":      {Func: rpcGetVideoLogStatus},
-	"getVideoSleepMode":      {Func: rpcGetVideoSleepMode},
-	"setVideoSleepMode":      {Func: rpcSetVideoSleepMode, Params: []string{"duration"}},
-	"getDevChannelState":     {Func: rpcGetDevChannelState},
-	"setDevChannelState":     {Func: rpcSetDevChannelState, Params: []string{"enabled"}},
-	"getLocalVersion":        {Func: rpcGetLocalVersion},
-	"getUpdateStatus":        {Func: rpcGetUpdateStatus},
-	"checkUpdateComponents":  {Func: rpcCheckUpdateComponents, Params: []string{"params", "includePreRelease"}},
-	"getUpdateStatusChannel": {Func: rpcGetUpdateStatusChannel},
-	"tryUpdate":              {Func: rpcTryUpdate},
-	"tryUpdateComponents":    {Func: rpcTryUpdateComponents, Params: []string{"params", "includePreRelease", "resetConfig"}},
-	"getDevModeState":        {Func: rpcGetDevModeState},
-	"setDevModeState":        {Func: rpcSetDevModeState, Params: []string{"enabled"}},
-	"getSSHKeyState":         {Func: rpcGetSSHKeyState},
-	"setSSHKeyState":         {Func: rpcSetSSHKeyState, Params: []string{"sshKey"}},
-	"getTLSState":            {Func: rpcGetTLSState},
-	"setTLSState":            {Func: rpcSetTLSState, Params: []string{"state"}},
-	"setMassStorageMode":     {Func: rpcSetMassStorageMode, Params: []string{"mode"}},
-	"getMassStorageMode":     {Func: rpcGetMassStorageMode},
-	"isUpdatePending":        {Func: rpcIsUpdatePending},
-	"getUsbEmulationState":   {Func: rpcGetUsbEmulationState},
-	"setUsbEmulationState":   {Func: rpcSetUsbEmulationState, Params: []string{"enabled"}},
-	"getUsbConfig":           {Func: rpcGetUsbConfig},
-	"setUsbConfig":           {Func: rpcSetUsbConfig, Params: []string{"usbConfig"}},
-	"checkMountUrl":          {Func: rpcCheckMountUrl, Params: []string{"url"}},
-	"getVirtualMediaState":   {Func: rpcGetVirtualMediaState},
-	"getStorageSpace":        {Func: rpcGetStorageSpace},
-	"mountWithHTTP":          {Func: rpcMountWithHTTP, Params: []string{"url", "mode"}},
-	"mountWithStorage":       {Func: rpcMountWithStorage, Params: []string{"filename", "mode"}},
-	"listStorageFiles":       {Func: rpcListStorageFiles},
-	"deleteStorageFile":      {Func: rpcDeleteStorageFile, Params: []string{"filename"}},
-	"startStorageFileUpload": {Func: rpcStartStorageFileUpload, Params: []string{"filename", "size"}},
-	"getWakeOnLanDevices":    {Func: rpcGetWakeOnLanDevices},
-	"setWakeOnLanDevices":    {Func: rpcSetWakeOnLanDevices, Params: []string{"params"}},
-	"resetConfig":            {Func: rpcResetConfig},
-	"setDisplayRotation":     {Func: rpcSetDisplayRotation, Params: []string{"params"}},
-	"getDisplayRotation":     {Func: rpcGetDisplayRotation},
-	"setBacklightSettings":   {Func: rpcSetBacklightSettings, Params: []string{"params"}},
-	"getBacklightSettings":   {Func: rpcGetBacklightSettings},
-	"getDCPowerState":        {Func: rpcGetDCPowerState},
-	"setDCPowerState":        {Func: rpcSetDCPowerState, Params: []string{"enabled"}},
-	"setDCRestoreState":      {Func: rpcSetDCRestoreState, Params: []string{"state"}},
-	"getActiveExtension":     {Func: rpcGetActiveExtension},
-	"setActiveExtension":     {Func: rpcSetActiveExtension, Params: []string{"extensionId"}},
-	"getATXState":            {Func: rpcGetATXState},
-	"setATXPowerAction":      {Func: rpcSetATXPowerAction, Params: []string{"action"}},
-	"getSerialSettings":      {Func: rpcGetSerialSettings},
-	"setSerialSettings":      {Func: rpcSetSerialSettings, Params: []string{"settings"}},
-	"getUsbDevices":          {Func: rpcGetUsbDevices},
-	"setUsbDevices":          {Func: rpcSetUsbDevices, Params: []string{"devices"}},
-	"setUsbDeviceState":      {Func: rpcSetUsbDeviceState, Params: []string{"device", "enabled"}},
-	"setCloudUrl":            {Func: rpcSetCloudUrl, Params: []string{"apiUrl", "appUrl"}},
-	"getKeyboardLayout":      {Func: rpcGetKeyboardLayout},
-	"setKeyboardLayout":      {Func: rpcSetKeyboardLayout, Params: []string{"layout"}},
-	"getKeyboardMacros":      {Func: getKeyboardMacros},
-	"setKeyboardMacros":      {Func: setKeyboardMacros, Params: []string{"params"}},
-	"getLocalLoopbackOnly":   {Func: rpcGetLocalLoopbackOnly},
-	"setLocalLoopbackOnly":   {Func: rpcSetLocalLoopbackOnly, Params: []string{"enabled"}},
-	"getPublicIPAddresses":   {Func: rpcGetPublicIPAddresses, Params: []string{"refresh"}},
-	"checkPublicIPAddresses": {Func: rpcCheckPublicIPAddresses},
-	"getDiagnostics":         {Func: rpcGetDiagnostics},
+	"ping":                    {Func: rpcPing},
+	"reboot":                  {Func: rpcReboot, Params: []string{"force"}},
+	"getDeviceID":             {Func: rpcGetDeviceID},
+	"deregisterDevice":        {Func: rpcDeregisterDevice},
+	"getCloudState":           {Func: rpcGetCloudState},
+	"getNetworkState":         {Func: rpcGetNetworkState},
+	"getNetworkSettings":      {Func: rpcGetNetworkSettings},
+	"setNetworkSettings":      {Func: rpcSetNetworkSettings, Params: []string{"settings"}},
+	"renewDHCPLease":          {Func: rpcRenewDHCPLease},
+	"getKeyboardLedState":     {Func: rpcGetKeyboardLedState},
+	"getKeyDownState":         {Func: rpcGetKeysDownState},
+	"keyboardReport":          {Func: rpcKeyboardReport, Params: []string{"modifier", "keys"}},
+	"keypressReport":          {Func: rpcKeypressReport, Params: []string{"key", "press"}},
+	"absMouseReport":          {Func: rpcAbsMouseReport, Params: []string{"x", "y", "buttons"}},
+	"relMouseReport":          {Func: rpcRelMouseReport, Params: []string{"dx", "dy", "buttons"}},
+	"wheelReport":             {Func: rpcWheelReport, Params: []string{"wheelY"}},
+	"getVideoState":           {Func: rpcGetVideoState},
+	"getUSBState":             {Func: rpcGetUSBState},
+	"unmountImage":            {Func: rpcUnmountImage},
+	"rpcMountBuiltInImage":    {Func: rpcMountBuiltInImage, Params: []string{"filename"}},
+	"setJigglerState":         {Func: rpcSetJigglerState, Params: []string{"enabled"}},
+	"getJigglerState":         {Func: rpcGetJigglerState},
+	"setJigglerConfig":        {Func: rpcSetJigglerConfig, Params: []string{"jigglerConfig"}},
+	"getJigglerConfig":        {Func: rpcGetJigglerConfig},
+	"getTimezones":            {Func: rpcGetTimezones},
+	"sendWOLMagicPacket":      {Func: rpcSendWOLMagicPacket, Params: []string{"macAddress"}},
+	"getStreamQualityFactor":  {Func: rpcGetStreamQualityFactor},
+	"setStreamQualityFactor":  {Func: rpcSetStreamQualityFactor, Params: []string{"factor"}},
+	"getAutoUpdateState":      {Func: rpcGetAutoUpdateState},
+	"setAutoUpdateState":      {Func: rpcSetAutoUpdateState, Params: []string{"enabled"}},
+	"getEDID":                 {Func: rpcGetEDID},
+	"getDefaultEDID":          {Func: rpcGetDefaultEDID},
+	"setEDID":                 {Func: rpcSetEDID, Params: []string{"edid"}},
+	"getVideoLogStatus":       {Func: rpcGetVideoLogStatus},
+	"getVideoSleepMode":       {Func: rpcGetVideoSleepMode},
+	"setVideoSleepMode":       {Func: rpcSetVideoSleepMode, Params: []string{"duration"}},
+	"getDevChannelState":      {Func: rpcGetDevChannelState},
+	"setDevChannelState":      {Func: rpcSetDevChannelState, Params: []string{"enabled"}},
+	"getLocalVersion":         {Func: rpcGetLocalVersion},
+	"getUpdateStatus":         {Func: rpcGetUpdateStatus},
+	"checkUpdateComponents":   {Func: rpcCheckUpdateComponents, Params: []string{"params", "includePreRelease"}},
+	"getUpdateStatusChannel":  {Func: rpcGetUpdateStatusChannel},
+	"tryUpdate":               {Func: rpcTryUpdate},
+	"tryUpdateComponents":     {Func: rpcTryUpdateComponents, Params: []string{"params", "includePreRelease", "resetConfig"}},
+	"getDevModeState":         {Func: rpcGetDevModeState},
+	"setDevModeState":         {Func: rpcSetDevModeState, Params: []string{"enabled"}},
+	"getSSHKeyState":          {Func: rpcGetSSHKeyState},
+	"setSSHKeyState":          {Func: rpcSetSSHKeyState, Params: []string{"sshKey"}},
+	"getTLSState":             {Func: rpcGetTLSState},
+	"setTLSState":             {Func: rpcSetTLSState, Params: []string{"state"}},
+	"setMassStorageMode":      {Func: rpcSetMassStorageMode, Params: []string{"mode"}},
+	"getMassStorageMode":      {Func: rpcGetMassStorageMode},
+	"isUpdatePending":         {Func: rpcIsUpdatePending},
+	"getUsbEmulationState":    {Func: rpcGetUsbEmulationState},
+	"setUsbEmulationState":    {Func: rpcSetUsbEmulationState, Params: []string{"enabled"}},
+	"getUsbConfig":            {Func: rpcGetUsbConfig},
+	"setUsbConfig":            {Func: rpcSetUsbConfig, Params: []string{"usbConfig"}},
+	"checkMountUrl":           {Func: rpcCheckMountUrl, Params: []string{"url"}},
+	"getVirtualMediaState":    {Func: rpcGetVirtualMediaState},
+	"getStorageSpace":         {Func: rpcGetStorageSpace},
+	"mountWithHTTP":           {Func: rpcMountWithHTTP, Params: []string{"url", "mode"}},
+	"mountWithStorage":        {Func: rpcMountWithStorage, Params: []string{"filename", "mode"}},
+	"listStorageFiles":        {Func: rpcListStorageFiles},
+	"deleteStorageFile":       {Func: rpcDeleteStorageFile, Params: []string{"filename"}},
+	"startStorageFileUpload":  {Func: rpcStartStorageFileUpload, Params: []string{"filename", "size"}},
+	"getWakeOnLanDevices":     {Func: rpcGetWakeOnLanDevices},
+	"setWakeOnLanDevices":     {Func: rpcSetWakeOnLanDevices, Params: []string{"params"}},
+	"resetConfig":             {Func: rpcResetConfig},
+	"setDisplayRotation":      {Func: rpcSetDisplayRotation, Params: []string{"params"}},
+	"getDisplayRotation":      {Func: rpcGetDisplayRotation},
+	"setBacklightSettings":    {Func: rpcSetBacklightSettings, Params: []string{"params"}},
+	"getBacklightSettings":    {Func: rpcGetBacklightSettings},
+	"getDCPowerState":         {Func: rpcGetDCPowerState},
+	"setDCPowerState":         {Func: rpcSetDCPowerState, Params: []string{"enabled"}},
+	"setDCRestoreState":       {Func: rpcSetDCRestoreState, Params: []string{"state"}},
+	"getActiveExtension":      {Func: rpcGetActiveExtension},
+	"setActiveExtension":      {Func: rpcSetActiveExtension, Params: []string{"extensionId"}},
+	"getATXState":             {Func: rpcGetATXState},
+	"setATXPowerAction":       {Func: rpcSetATXPowerAction, Params: []string{"action"}},
+	"getSerialSettings":       {Func: rpcGetSerialSettings},
+	"setSerialSettings":       {Func: rpcSetSerialSettings, Params: []string{"settings"}},
+	"getUsbDevices":           {Func: rpcGetUsbDevices},
+	"setUsbDevices":           {Func: rpcSetUsbDevices, Params: []string{"devices"}},
+	"setUsbDeviceState":       {Func: rpcSetUsbDeviceState, Params: []string{"device", "enabled"}},
+	"getAudioOutputEnabled":   {Func: rpcGetAudioOutputEnabled},
+	"setAudioOutputEnabled":   {Func: rpcSetAudioOutputEnabled, Params: []string{"enabled"}},
+	"getAudioInputEnabled":    {Func: rpcGetAudioInputEnabled},
+	"setAudioInputEnabled":    {Func: rpcSetAudioInputEnabled, Params: []string{"enabled"}},
+	"refreshHdmiConnection":   {Func: rpcRefreshHdmiConnection},
+	"getAudioConfig":          {Func: rpcGetAudioConfig},
+	"setAudioConfig":          {Func: rpcSetAudioConfig, Params: []string{"bitrate", "complexity", "dtxEnabled", "fecEnabled", "bufferPeriods", "packetLossPerc"}},
+	"restartAudioOutput":      {Func: rpcRestartAudioOutput},
+	"getAudioInputAutoEnable": {Func: rpcGetAudioInputAutoEnable},
+	"setAudioInputAutoEnable": {Func: rpcSetAudioInputAutoEnable, Params: []string{"enabled"}},
+	"setCloudUrl":             {Func: rpcSetCloudUrl, Params: []string{"apiUrl", "appUrl"}},
+	"getKeyboardLayout":       {Func: rpcGetKeyboardLayout},
+	"setKeyboardLayout":       {Func: rpcSetKeyboardLayout, Params: []string{"layout"}},
+	"getKeyboardMacros":       {Func: getKeyboardMacros},
+	"setKeyboardMacros":       {Func: setKeyboardMacros, Params: []string{"params"}},
+	"getLocalLoopbackOnly":    {Func: rpcGetLocalLoopbackOnly},
+	"setLocalLoopbackOnly":    {Func: rpcSetLocalLoopbackOnly, Params: []string{"enabled"}},
+	"getPublicIPAddresses":    {Func: rpcGetPublicIPAddresses, Params: []string{"refresh"}},
+	"checkPublicIPAddresses":  {Func: rpcCheckPublicIPAddresses},
 }

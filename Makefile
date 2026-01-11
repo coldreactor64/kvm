@@ -2,7 +2,7 @@ BRANCH    := $(shell git rev-parse --abbrev-ref HEAD)
 BUILDDATE := $(shell date -u +%FT%T%z)
 BUILDTS   := $(shell date -u +%s)
 REVISION  := $(shell git rev-parse HEAD)
-VERSION := 0.5.1
+VERSION := 0.5.3
 VERSION_DEV := $(VERSION)-dev$(shell date -u +%Y%m%d%H%M)
 
 PROMETHEUS_TAG := github.com/prometheus/common/version
@@ -48,18 +48,36 @@ BIN_DIR := $(shell pwd)/bin
 
 TEST_DIRS := $(shell find . -name "*_test.go" -type f -exec dirname {} \; | sort -u)
 
+# Build ALSA and Opus static libs for ARM in /opt/jetkvm-audio-libs
+build_audio_deps:
+	bash .devcontainer/install_audio_deps.sh
+
 test:
 	go test ./...
 
-test_e2e:
-	@read -p "Device IP: " device_ip; \
-	cd ui && npm install && npx playwright install --with-deps chromium && \
-	NODE_NO_WARNINGS=1 JETKVM_URL="http://$$device_ip" npm run test:e2e
+# E2E tests - builds, sets up mock server, runs all tests including OTA
+test_e2e: build_dev
+	@if [ -z "$(DEVICE_IP)" ]; then \
+		read -p "Device IP: " device_ip; \
+	else \
+		device_ip="$(DEVICE_IP)"; \
+	fi; \
+	cd ui && npm ci && npx playwright install chromium && cd ..; \
+	./scripts/test_local_update.sh "$$device_ip" "bin/jetkvm_app" "$(VERSION_DEV)"
 
 lint:
 	go vet ./...
 
 check: lint test
+
+# Comprehensive lint with auto-fix (Go + UI)
+lint-fix: build_audio_deps
+	@echo "Running golangci-lint with auto-fix..."
+	@mkdir -p static && touch static/.gitkeep
+	golangci-lint run --fix --verbose
+	@echo "Running UI lint with auto-fix..."
+	@cd ui && npm ci && npm run lint:fix
+	@echo "All linting completed!"
 
 build_native:
 	@if [ "$(SKIP_NATIVE_IF_EXISTS)" = "1" ] && [ -f "internal/native/cgo/lib/libjknative.a" ]; then \
@@ -169,7 +187,7 @@ dev_release: git_check_dev
 		read -p "Device IP: " device_ip; \
 		echo "Installing Playwright dependencies..."; \
 		cd ui && npm ci && npx playwright install --with-deps chromium && cd ..; \
-		./scripts/test_release_on_device.sh "$$device_ip" bin/jetkvm_app test $(VERSION_DEV) || exit 1; \
+		./scripts/test_local_update.sh "$$device_ip" bin/jetkvm_app $(VERSION_DEV) || exit 1; \
 	fi
 	@echo "Uploading device app to R2..."
 	@shasum -a 256 bin/jetkvm_app | cut -d ' ' -f 1 > bin/jetkvm_app.sha256
@@ -229,7 +247,7 @@ release: git_check_dev
 		read -p "Device IP: " device_ip; \
 		echo "Installing Playwright dependencies..."; \
 		cd ui && npm ci && npx playwright install --with-deps chromium && cd ..; \
-		./scripts/test_release_on_device.sh "$$device_ip" bin/jetkvm_app test $(VERSION) || exit 1; \
+		./scripts/test_local_update.sh "$$device_ip" bin/jetkvm_app $(VERSION) || exit 1; \
 	fi
 	@echo "Uploading device app to R2..."
 	@shasum -a 256 bin/jetkvm_app | cut -d ' ' -f 1 > bin/jetkvm_app.sha256
@@ -263,3 +281,4 @@ bump-version:
 		git commit -m "Bump version to $$next_ver" && \
 		git push && \
 		echo "✓ Bumped to $$next_ver"
+

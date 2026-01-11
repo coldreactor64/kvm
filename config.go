@@ -10,6 +10,7 @@ import (
 
 	"github.com/jetkvm/kvm/internal/confparser"
 	"github.com/jetkvm/kvm/internal/logging"
+	"github.com/jetkvm/kvm/internal/native"
 	"github.com/jetkvm/kvm/internal/network/types"
 	"github.com/jetkvm/kvm/internal/usbgadget"
 	"github.com/prometheus/client_golang/prometheus"
@@ -95,7 +96,7 @@ type Config struct {
 	IncludePreRelease    bool                 `json:"include_pre_release"`
 	HashedPassword       string               `json:"hashed_password"`
 	LocalAuthToken       string               `json:"local_auth_token"`
-	LocalAuthMode        string               `json:"localAuthMode"` //TODO: fix it with migration
+	LocalAuthMode        string               `json:"localAuthMode"` // Uses camelCase for backwards compatibility with existing configs
 	LocalLoopbackOnly    bool                 `json:"local_loopback_only"`
 	WakeOnLanDevices     []WakeOnLanDevice    `json:"wake_on_lan_devices"`
 	KeyboardMacros       []KeyboardMacro      `json:"keyboard_macros"`
@@ -113,6 +114,14 @@ type Config struct {
 	DefaultLogLevel      string               `json:"default_log_level"`
 	VideoSleepAfterSec   int                  `json:"video_sleep_after_sec"`
 	VideoQualityFactor   float64              `json:"video_quality_factor"`
+	AudioInputAutoEnable bool                 `json:"audio_input_auto_enable"`
+	AudioOutputEnabled   bool                 `json:"audio_output_enabled"`
+	AudioBitrate         int                  `json:"audio_bitrate"`    // kbps (64-256)
+	AudioComplexity      int                  `json:"audio_complexity"` // 0-10
+	AudioDTXEnabled      bool                 `json:"audio_dtx_enabled"`
+	AudioFECEnabled      bool                 `json:"audio_fec_enabled"`
+	AudioBufferPeriods   int                  `json:"audio_buffer_periods"`   // 2-24
+	AudioPacketLossPerc  int                  `json:"audio_packet_loss_perc"` // 0-100
 	NativeMaxRestart     uint                 `json:"native_max_restart_attempts"`
 }
 
@@ -147,8 +156,8 @@ func (c *Config) SetDisplayRotation(rotation string) error {
 
 const configPath = "/userdata/kvm_config.json"
 
-// it's a temporary solution to avoid sharing the same pointer
-// we should migrate to a proper config solution in the future
+// Default configuration structs used to create independent copies in getDefaultConfig().
+// These are package-level variables to avoid repeated allocations.
 var (
 	defaultJigglerConfig = JigglerConfig{
 		InactivityLimitSeconds: 60,
@@ -169,6 +178,7 @@ var (
 		Keyboard:      true,
 		MassStorage:   true,
 		Gamepad:       true,
+		Audio:         true,
 	}
 )
 
@@ -182,6 +192,7 @@ func getDefaultConfig() Config {
 		KeyboardMacros:       []KeyboardMacro{},
 		DisplayRotation:      "270",
 		KeyboardLayout:       "en-US",
+		EdidString:           native.DefaultEDID,
 		DisplayMaxBrightness: 64,
 		DisplayDimAfterSec:   120,  // 2 minutes
 		DisplayOffAfterSec:   1800, // 30 minutes
@@ -196,8 +207,16 @@ func getDefaultConfig() Config {
 			_ = confparser.SetDefaultsAndValidate(c)
 			return c
 		}(),
-		DefaultLogLevel:    "INFO",
-		VideoQualityFactor: 1.0,
+		DefaultLogLevel:      "WARN",
+		VideoQualityFactor:   1.0,
+		AudioInputAutoEnable: false,
+		AudioOutputEnabled:   true,
+		AudioBitrate:         192,
+		AudioComplexity:      8,
+		AudioDTXEnabled:      true,
+		AudioFECEnabled:      true,
+		AudioBufferPeriods:   12,
+		AudioPacketLossPerc:  20,
 	}
 }
 
@@ -268,9 +287,25 @@ func LoadConfig() {
 		loadedConfig.JigglerConfig = getDefaultConfig().JigglerConfig
 	}
 
+	// Apply audio defaults for new configs
+	if loadedConfig.AudioBitrate == 0 {
+		defaults := getDefaultConfig()
+		loadedConfig.AudioBitrate = defaults.AudioBitrate
+		loadedConfig.AudioComplexity = defaults.AudioComplexity
+		loadedConfig.AudioDTXEnabled = defaults.AudioDTXEnabled
+		loadedConfig.AudioFECEnabled = defaults.AudioFECEnabled
+		loadedConfig.AudioBufferPeriods = defaults.AudioBufferPeriods
+		loadedConfig.AudioPacketLossPerc = defaults.AudioPacketLossPerc
+	}
+
 	// fixup old keyboard layout value
 	if loadedConfig.KeyboardLayout == "en_US" {
 		loadedConfig.KeyboardLayout = "en-US"
+	}
+
+	// Migrate old verbose log level to sensible default
+	if loadedConfig.DefaultLogLevel == "INFO" {
+		loadedConfig.DefaultLogLevel = "WARN"
 	}
 
 	config = &loadedConfig

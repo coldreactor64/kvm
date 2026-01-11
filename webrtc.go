@@ -16,6 +16,7 @@ import (
 	"github.com/jetkvm/kvm/internal/hidrpc"
 	"github.com/jetkvm/kvm/internal/logging"
 	"github.com/jetkvm/kvm/internal/usbgadget"
+	"github.com/pion/ice/v4"
 	"github.com/pion/webrtc/v4"
 	"github.com/rs/zerolog"
 )
@@ -23,6 +24,7 @@ import (
 type Session struct {
 	peerConnection           *webrtc.PeerConnection
 	VideoTrack               *webrtc.TrackLocalStaticSample
+	AudioTrack               *webrtc.TrackLocalStaticSample
 	ControlChannel           *webrtc.DataChannel
 	RPCChannel               *webrtc.DataChannel
 	HidChannel               *webrtc.DataChannel
@@ -123,6 +125,7 @@ type SessionConfig struct {
 	IsCloud    bool
 	ws         *websocket.Conn
 	Logger     *zerolog.Logger
+	MDNSMode   string
 }
 
 func (s *Session) ExchangeOffer(offerStr string) (string, error) {
@@ -249,6 +252,22 @@ func newSession(config SessionConfig) (*Session, error) {
 	webrtcSettingEngine := webrtc.SettingEngine{
 		LoggerFactory: logging.GetPionDefaultLoggerFactory(),
 	}
+
+	mDNSNetworkTypes := make([]webrtc.NetworkType, 0)
+	if config.MDNSMode == "auto" || config.MDNSMode == "ipv4_only" {
+		mDNSNetworkTypes = append(mDNSNetworkTypes, webrtc.NetworkTypeUDP4)
+	}
+	if config.MDNSMode == "auto" || config.MDNSMode == "ipv6_only" {
+		mDNSNetworkTypes = append(mDNSNetworkTypes, webrtc.NetworkTypeUDP6)
+	}
+
+	if len(mDNSNetworkTypes) > 0 {
+		webrtcSettingEngine.SetNetworkTypes(mDNSNetworkTypes)
+		webrtcSettingEngine.SetICEMulticastDNSMode(ice.MulticastDNSModeQueryOnly)
+	} else {
+		webrtcSettingEngine.SetICEMulticastDNSMode(ice.MulticastDNSModeDisabled)
+	}
+
 	iceServer := webrtc.ICEServer{}
 
 	var scopedLogger *zerolog.Logger
@@ -268,10 +287,21 @@ func newSession(config SessionConfig) (*Session, error) {
 		}
 
 		if config.LocalIP == "" || net.ParseIP(config.LocalIP) == nil {
-			scopedLogger.Info().Str("localIP", config.LocalIP).Msg("Local IP address not provided or invalid, won't set NAT1To1IPs")
+			scopedLogger.Info().Str("localIP", config.LocalIP).Msg("Local IP address not provided or invalid, won't set ICEAddressRewriteRules")
 		} else {
-			webrtcSettingEngine.SetNAT1To1IPs([]string{config.LocalIP}, webrtc.ICECandidateTypeSrflx)
-			scopedLogger.Info().Str("localIP", config.LocalIP).Msg("Setting NAT1To1IPs")
+			err := webrtcSettingEngine.SetICEAddressRewriteRules(
+				webrtc.ICEAddressRewriteRule{
+					CIDR:            "0.0.0.0/0",
+					External:        []string{config.LocalIP},
+					Mode:            webrtc.ICEAddressRewriteReplace,
+					AsCandidateType: webrtc.ICECandidateTypeSrflx,
+				},
+			)
+			if err != nil {
+				scopedLogger.Warn().Err(err).Str("localIP", config.LocalIP).Msg("Failed to set ICEAddressRewriteRules")
+			} else {
+				scopedLogger.Info().Str("localIP", config.LocalIP).Msg("Set ICEAddressRewriteRules for local IP")
+			}
 		}
 	}
 
@@ -365,6 +395,40 @@ func newSession(config SessionConfig) (*Session, error) {
 			}
 		}
 	}()
+
+	session.AudioTrack, err = webrtc.NewTrackLocalStaticSample(
+		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus},
+		"audio",
+		"kvm-audio",
+	)
+	if err != nil {
+		scopedLogger.Warn().Err(err).Msg("Failed to create AudioTrack (non-fatal)")
+		session.AudioTrack = nil
+	} else {
+		_, err = peerConnection.AddTransceiverFromTrack(session.AudioTrack, webrtc.RTPTransceiverInit{
+			Direction: webrtc.RTPTransceiverDirectionSendrecv,
+		})
+		if err != nil {
+			scopedLogger.Warn().Err(err).Msg("Failed to add AudioTrack transceiver (non-fatal)")
+			session.AudioTrack = nil
+		} else {
+			setAudioTrack(session.AudioTrack)
+
+			peerConnection.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
+				scopedLogger.Info().
+					Str("codec", track.Codec().MimeType).
+					Str("track_id", track.ID()).
+					Msg("Received incoming audio track from browser")
+
+				// Store track for connection when audio starts
+				// OnTrack fires during SDP exchange, before ICE connection completes
+				setPendingInputTrack(track)
+			})
+
+			scopedLogger.Info().Msg("Audio tracks configured successfully")
+		}
+	}
+
 	var isConnected bool
 
 	peerConnection.OnICECandidate(func(candidate *webrtc.ICECandidate) {
@@ -395,6 +459,8 @@ func newSession(config SessionConfig) (*Session, error) {
 		}
 		if connectionState == webrtc.ICEConnectionStateClosed {
 			scopedLogger.Debug().Msg("ICE Connection State is closed, unmounting virtual media")
+			// Only clear currentSession if this is actually the current session
+			// This prevents race condition where old session closes after new one connects
 			if session == currentSession {
 				// Cancel any ongoing keyboard report multi when session closes
 				cancelKeyboardMacro()
@@ -441,10 +507,12 @@ func onActiveSessionsChanged() {
 func onFirstSessionConnected() {
 	notifyFailsafeMode(currentSession)
 	_ = nativeInstance.VideoStart()
+	onWebRTCConnect()
 	stopVideoSleepModeTicker()
 }
 
 func onLastSessionDisconnected() {
 	_ = nativeInstance.VideoStop()
+	onWebRTCDisconnect()
 	startVideoSleepModeTicker()
 }

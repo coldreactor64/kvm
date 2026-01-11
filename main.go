@@ -62,6 +62,9 @@ func Main() {
 	initNative(systemVersionLocal, appVersionLocal)
 	initDisplay()
 
+	initAudio()
+	defer stopAudio()
+
 	http.DefaultClient.Timeout = 1 * time.Minute
 
 	err = rootcerts.UpdateDefaultTransport()
@@ -104,6 +107,7 @@ func Main() {
 	if err := initImagesFolder(); err != nil {
 		logger.Warn().Err(err).Msg("failed to init images folder")
 	}
+
 	initJiggler()
 
 	// start video sleep mode timer
@@ -170,6 +174,7 @@ func Main() {
 	<-sigs
 
 	logger.Log().Msg("JetKVM Shutting Down")
+
 	//if fuseServer != nil {
 	//	err := setMassStorageImage(" ")
 	//	if err != nil {

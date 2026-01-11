@@ -15,7 +15,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import useWebSocket from "react-use-websocket";
 
 import { cx } from "@/cva.config";
-import { CLOUD_API } from "@/ui.config";
+import { CLOUD_API, OPUS_STEREO_PARAMS } from "@/ui.config";
 import api from "@/api";
 import { checkAuth, isInCloud, isOnDevice } from "@/main";
 import {
@@ -29,6 +29,7 @@ import {
   useNetworkStateStore,
   User,
   useRTCStore,
+  useSettingsStore,
   useUiStore,
   useUpdateStore,
   useVideoStore,
@@ -53,6 +54,7 @@ import {
 } from "@components/VideoOverlay";
 import { FeatureFlagProvider } from "@providers/FeatureFlagProvider";
 import { m } from "@localizations/messages.js";
+import { isSecureContext } from "@/utils";
 import { doRpcHidHandshake, useHidRpc } from "@hooks/useHidRpc";
 import useKeyboard from "@hooks/useKeyboard";
 import { registerTestHandlers, cleanupTestHooks } from "@/test/testHooks";
@@ -117,6 +119,8 @@ export default function KvmIdRoute() {
   const params = useParams() as { id: string };
   const { sidebarView, setSidebarView, disableVideoFocusTrap, rebootState, setRebootState } =
     useUiStore();
+  const { microphoneEnabled, setMicrophoneEnabled, audioInputAutoEnable, setAudioInputAutoEnable } =
+    useSettingsStore();
   const [queryParams, setQueryParams] = useSearchParams();
 
   const {
@@ -130,10 +134,14 @@ export default function KvmIdRoute() {
     setTurnServerInUse,
     rpcDataChannel,
     setTransceiver,
+    setAudioTransceiver,
+    audioTransceiver,
     setRpcHidChannel,
     setRpcHidUnreliableNonOrderedChannel,
     setRpcHidUnreliableChannel,
     setRpcHidProtocolVersion,
+    terminalChannel,
+    setTerminalChannel,
   } = useRTCStore();
 
   const location = useLocation();
@@ -181,6 +189,30 @@ export default function KvmIdRoute() {
       remoteDescription: RTCSessionDescriptionInit,
     ) {
       setLoadingMessage(m.setting_remote_description());
+
+      // Enable stereo in remote answer SDP
+      if (remoteDescription.sdp) {
+        const opusMatch = remoteDescription.sdp.match(/a=rtpmap:(\d+)\s+opus\/48000\/2/i);
+        if (!opusMatch) {
+          console.warn("[SDP] Opus 48kHz stereo not found in answer - stereo may not work");
+        } else {
+          const pt = opusMatch[1];
+          const fmtpRegex = new RegExp(`a=fmtp:${pt}\\s+(.+)`, "i");
+          const fmtpMatch = remoteDescription.sdp.match(fmtpRegex);
+
+          if (fmtpMatch && !fmtpMatch[1].includes("stereo=")) {
+            remoteDescription.sdp = remoteDescription.sdp.replace(
+              fmtpRegex,
+              `a=fmtp:${pt} ${fmtpMatch[1]};${OPUS_STEREO_PARAMS}`,
+            );
+          } else if (!fmtpMatch) {
+            remoteDescription.sdp = remoteDescription.sdp.replace(
+              opusMatch[0],
+              `${opusMatch[0]}\r\na=fmtp:${pt} ${OPUS_STEREO_PARAMS}`,
+            );
+          }
+        }
+      }
 
       try {
         await pc.setRemoteDescription(new RTCSessionDescription(remoteDescription));
@@ -441,6 +473,35 @@ export default function KvmIdRoute() {
         makingOffer.current = true;
 
         const offer = await pc.createOffer();
+
+        // Enable stereo for Opus audio codec
+        if (offer.sdp) {
+          const opusMatch = offer.sdp.match(/a=rtpmap:(\d+)\s+opus\/48000\/2/i);
+          if (!opusMatch) {
+            console.warn("[SDP] Opus 48kHz stereo not found in offer - stereo may not work");
+          } else {
+            const pt = opusMatch[1];
+            const fmtpRegex = new RegExp(`a=fmtp:${pt}\\s+(.+)`, "i");
+            const fmtpMatch = offer.sdp.match(fmtpRegex);
+
+            if (fmtpMatch) {
+              // Modify existing fmtp line
+              if (!fmtpMatch[1].includes("stereo=")) {
+                offer.sdp = offer.sdp.replace(
+                  fmtpRegex,
+                  `a=fmtp:${pt} ${fmtpMatch[1]};${OPUS_STEREO_PARAMS}`,
+                );
+              }
+            } else {
+              // Add new fmtp line after rtpmap
+              offer.sdp = offer.sdp.replace(
+                opusMatch[0],
+                `${opusMatch[0]}\r\na=fmtp:${pt} ${OPUS_STEREO_PARAMS}`,
+              );
+            }
+          }
+        }
+
         await pc.setLocalDescription(offer);
         const sd = btoa(JSON.stringify(pc.localDescription));
         const isNewSignalingEnabled = isLegacySignalingEnabled.current === false;
@@ -480,13 +541,21 @@ export default function KvmIdRoute() {
     };
 
     pc.ontrack = function (event) {
-      setMediaStream(event.streams[0]);
+      if (event.track.kind === "video") {
+        setMediaStream(event.streams[0]);
+      }
     };
 
     setTransceiver(pc.addTransceiver("video", { direction: "recvonly" }));
 
+    const audioTrans = pc.addTransceiver("audio", { direction: "sendrecv" });
+    setAudioTransceiver(audioTrans);
+
     const rpcDataChannel = pc.createDataChannel("rpc");
-    rpcDataChannel.onclose = () => console.log("rpcDataChannel has closed");
+    rpcDataChannel.onclose = () => {
+      console.log("rpcDataChannel has closed");
+      setRpcDataChannel(null);
+    };
     rpcDataChannel.onerror = (ev: Event) =>
       console.error(`Error on DataChannel '${rpcDataChannel.label}': ${ev}`);
     rpcDataChannel.onopen = () => {
@@ -530,6 +599,15 @@ export default function KvmIdRoute() {
       setRpcHidUnreliableNonOrderedChannel(rpcHidUnreliableNonOrderedChannel);
     };
 
+    // Create terminal channel as part of initial offer
+    const terminalDataChannel = pc.createDataChannel("terminal");
+    terminalDataChannel.onclose = () => console.log("terminalDataChannel has closed");
+    terminalDataChannel.onerror = (ev: Event) =>
+      console.error(`Error on terminalDataChannel '${terminalDataChannel.label}': ${ev}`);
+    terminalDataChannel.onopen = () => {
+      setTerminalChannel(terminalDataChannel);
+    };
+
     setPeerConnection(pc);
   }, [
     cleanupAndStopReconnecting,
@@ -544,7 +622,9 @@ export default function KvmIdRoute() {
     setRpcHidUnreliableNonOrderedChannel,
     setRpcHidUnreliableChannel,
     setRpcHidProtocolVersion,
+    setTerminalChannel,
     setTransceiver,
+    setAudioTransceiver,
   ]);
 
   useEffect(() => {
@@ -553,6 +633,69 @@ export default function KvmIdRoute() {
       cleanupAndStopReconnecting();
     }
   }, [peerConnectionState, cleanupAndStopReconnecting]);
+
+  const microphoneRequestInProgress = useRef(false);
+  useEffect(() => {
+    if (!audioTransceiver || !peerConnection) return;
+
+    if (microphoneEnabled) {
+      if (microphoneRequestInProgress.current) return;
+
+      const currentTrack = audioTransceiver.sender.track;
+      if (currentTrack) {
+        currentTrack.stop();
+      }
+
+      const requestMicrophone = () => {
+        microphoneRequestInProgress.current = true;
+        navigator.mediaDevices
+          ?.getUserMedia({
+            audio: {
+              echoCancellation: true,
+              noiseSuppression: true,
+              autoGainControl: true,
+              channelCount: 1,
+            },
+          })
+          .then(stream => {
+            microphoneRequestInProgress.current = false;
+            const audioTrack = stream.getAudioTracks()[0];
+            if (audioTrack && audioTransceiver.sender) {
+              const handleTrackEnded = () => {
+                console.warn("Microphone track ended unexpectedly, attempting to restart...");
+                if (audioTransceiver.sender.track === audioTrack) {
+                  audioTransceiver.sender.replaceTrack(null);
+                  setTimeout(requestMicrophone, 500);
+                }
+              };
+
+              audioTrack.addEventListener("ended", handleTrackEnded, { once: true });
+              audioTransceiver.sender.replaceTrack(audioTrack);
+            }
+          })
+          .catch(err => {
+            microphoneRequestInProgress.current = false;
+            console.error("Failed to get microphone:", err);
+            setMicrophoneEnabled(false);
+          });
+      };
+
+      requestMicrophone();
+    } else {
+      microphoneRequestInProgress.current = false;
+      if (audioTransceiver.sender.track) {
+        audioTransceiver.sender.track.stop();
+        audioTransceiver.sender.replaceTrack(null);
+      }
+    }
+
+    // Cleanup on unmount or when dependencies change
+    return () => {
+      if (audioTransceiver?.sender.track) {
+        audioTransceiver.sender.track.stop();
+      }
+    };
+  }, [microphoneEnabled, audioTransceiver, peerConnection, setMicrophoneEnabled]);
 
   // Cleanup effect
   const { clearInboundRtpStats, clearCandidatePairStats } = useRTCStore();
@@ -571,6 +714,7 @@ export default function KvmIdRoute() {
       setSidebarView(null);
       setPeerConnection(null);
       setRpcDataChannel(null);
+      setTerminalChannel(null);
     };
   }, [
     clearCandidatePairStats,
@@ -578,6 +722,7 @@ export default function KvmIdRoute() {
     setPeerConnection,
     setSidebarView,
     setRpcDataChannel,
+    setTerminalChannel,
   ]);
 
   // TURN server usage detection
@@ -747,22 +892,6 @@ export default function KvmIdRoute() {
     [reportAbsMouseEvent, rpcHidReady, send],
   );
 
-  // Register E2E test hooks
-  useEffect(() => {
-    registerTestHandlers({
-      handleKeyPress,
-      handleAbsMouseMove,
-      getKeyboardLedState: () => useHidStore.getState().keyboardLedState,
-      getKeysDownState: () => useHidStore.getState().keysDownState,
-      getPeerConnectionState: () => useRTCStore.getState().peerConnectionState,
-      getRpcHidProtocolVersion: () => useRTCStore.getState().rpcHidProtocolVersion,
-      getMediaStream: () => useRTCStore.getState().mediaStream,
-      getHdmiState: () => useVideoStore.getState().hdmiState,
-      getVideoElement: () => useVideoStore.getState().videoElement,
-    });
-    return cleanupTestHooks;
-  }, [handleKeyPress, handleAbsMouseMove]);
-
   useEffect(() => {
     if (rpcDataChannel?.readyState !== "open") return;
     console.log("Requesting video state");
@@ -773,6 +902,53 @@ export default function KvmIdRoute() {
       setHdmiState(hdmiState);
     });
   }, [rpcDataChannel?.readyState, send, setHdmiState]);
+
+  const [audioInputAutoEnableLoaded, setAudioInputAutoEnableLoaded] = useState(false);
+  useEffect(() => {
+    if (rpcDataChannel?.readyState !== "open") return;
+    send("getAudioInputAutoEnable", {}, (resp: JsonRpcResponse) => {
+      if ("error" in resp) return;
+      setAudioInputAutoEnable(resp.result as boolean);
+      setAudioInputAutoEnableLoaded(true);
+    });
+  }, [rpcDataChannel?.readyState, send, setAudioInputAutoEnable]);
+
+  const autoEnableAppliedRef = useRef(false);
+  const audioInputAutoEnableValueRef = useRef(audioInputAutoEnable);
+
+  useEffect(() => {
+    audioInputAutoEnableValueRef.current = audioInputAutoEnable;
+  }, [audioInputAutoEnable]);
+
+  useEffect(() => {
+    if (!audioTransceiver || !peerConnection || microphoneEnabled) return;
+    if (!audioInputAutoEnableLoaded || autoEnableAppliedRef.current) return;
+
+    if (audioInputAutoEnableValueRef.current && isSecureContext()) {
+      autoEnableAppliedRef.current = true;
+      send("setAudioInputEnabled", { enabled: true }, (resp: JsonRpcResponse) => {
+        if ("error" in resp) {
+          console.error("Failed to auto-enable audio input:", resp.error);
+        } else {
+          setMicrophoneEnabled(true);
+        }
+      });
+    }
+  }, [
+    audioTransceiver,
+    peerConnection,
+    audioInputAutoEnableLoaded,
+    microphoneEnabled,
+    setMicrophoneEnabled,
+    send,
+  ]);
+
+  useEffect(() => {
+    if (!peerConnection) {
+      autoEnableAppliedRef.current = false;
+      setAudioInputAutoEnableLoaded(false);
+    }
+  }, [peerConnection]);
 
   const [needLedState, setNeedLedState] = useState(true);
 
@@ -836,20 +1012,32 @@ export default function KvmIdRoute() {
     }
   }, [navigate, navigateTo, queryParams, setModalView, setQueryParams]);
 
-  // System update
-  const [kvmTerminal, setKvmTerminal] = useState<RTCDataChannel | null>(null);
+  // Serial console - still created via useEffect for now
   const [serialConsole, setSerialConsole] = useState<RTCDataChannel | null>(null);
 
   useEffect(() => {
     if (!peerConnection) return;
-    if (!kvmTerminal) {
-      setKvmTerminal(peerConnection.createDataChannel("terminal"));
-    }
-
     if (!serialConsole) {
       setSerialConsole(peerConnection.createDataChannel("serial"));
     }
-  }, [kvmTerminal, peerConnection, serialConsole]);
+  }, [peerConnection, serialConsole]);
+
+  // Register E2E test hooks
+  useEffect(() => {
+    registerTestHandlers({
+      handleKeyPress,
+      handleAbsMouseMove,
+      getKeyboardLedState: () => useHidStore.getState().keyboardLedState,
+      getKeysDownState: () => useHidStore.getState().keysDownState,
+      getPeerConnectionState: () => useRTCStore.getState().peerConnectionState,
+      getRpcHidProtocolVersion: () => useRTCStore.getState().rpcHidProtocolVersion,
+      getMediaStream: () => useRTCStore.getState().mediaStream,
+      getHdmiState: () => useVideoStore.getState().hdmiState,
+      getVideoElement: () => useVideoStore.getState().videoElement,
+      getKvmTerminal: () => useRTCStore.getState().terminalChannel,
+    });
+    return cleanupTestHooks;
+  }, [handleKeyPress, handleAbsMouseMove]);
 
   const outlet = useOutlet();
   const onModalClose = useCallback(() => {
@@ -998,7 +1186,9 @@ export default function KvmIdRoute() {
         </Modal>
       </div>
 
-      {kvmTerminal && <Terminal type="kvm" dataChannel={kvmTerminal} title={m.kvm_terminal()} />}
+      {terminalChannel && (
+        <Terminal type="kvm" dataChannel={terminalChannel} title={m.kvm_terminal()} />
+      )}
 
       {serialConsole && (
         <Terminal type="serial" dataChannel={serialConsole} title={m.serial_console()} />

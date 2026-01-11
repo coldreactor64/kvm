@@ -11,7 +11,6 @@ var gadget *usbgadget.UsbGadget
 var gamepadEnableLock sync.Mutex
 var gamepadEnableAttempted bool
 
-// initUsbGadget initializes the USB gadget.
 // call it only after the config is loaded.
 func initUsbGadget() {
 	gadget = usbgadget.NewUsbGadget(
@@ -46,7 +45,6 @@ func initUsbGadget() {
 		}
 	})
 
-	// open the keyboard hid file to listen for keyboard events
 	if err := gadget.OpenKeyboardHidFile(); err != nil {
 		usbLogger.Error().Err(err).Msg("failed to open keyboard hid file")
 	}
@@ -132,15 +130,27 @@ func checkUSBState() {
 	defer usbStateLock.Unlock()
 
 	newState := gadget.GetUsbState()
-
-	usbLogger.Trace().Str("old", usbState).Str("new", newState).Msg("Checking USB state")
-
 	if newState == usbState {
 		return
 	}
 
+	oldState := usbState
 	usbState = newState
-	usbLogger.Info().Str("from", usbState).Str("to", newState).Msg("USB state changed")
+	usbLogger.Info().Str("from", oldState).Str("to", newState).Msg("USB state changed")
+
+	if oldState == "configured" && newState != "configured" {
+		usbLogger.Info().Msg("USB deconfigured, closing HID files")
+		gadget.CloseHidFiles()
+	}
+
+	if newState == "configured" && oldState != "configured" {
+		usbLogger.Info().Msg("USB configured, reopening HID files")
+		gadget.CloseHidFiles()
+		gadget.PreOpenHidFiles()
+		if err := gadget.OpenKeyboardHidFile(); err != nil {
+			usbLogger.Error().Err(err).Msg("failed to reopen keyboard hid file")
+		}
+	}
 
 	requestDisplayUpdate(true, "usb_state_changed")
 	triggerUSBStateUpdate()

@@ -135,6 +135,9 @@ export interface RTCState {
   transceiver: RTCRtpTransceiver | null;
   setTransceiver: (transceiver: RTCRtpTransceiver) => void;
 
+  audioTransceiver: RTCRtpTransceiver | null;
+  setAudioTransceiver: (transceiver: RTCRtpTransceiver) => void;
+
   mediaStream: MediaStream | null;
   setMediaStream: (stream: MediaStream) => void;
 
@@ -165,7 +168,7 @@ export interface RTCState {
   appendDiskDataChannelStats: (stats: RTCDataChannelStats) => void;
 
   terminalChannel: RTCDataChannel | null;
-  setTerminalChannel: (channel: RTCDataChannel) => void;
+  setTerminalChannel: (channel: RTCDataChannel | null) => void;
 }
 
 export const useRTCStore = create<RTCState>(set => ({
@@ -193,6 +196,9 @@ export const useRTCStore = create<RTCState>(set => ({
 
   transceiver: null,
   setTransceiver: transceiver => set({ transceiver }),
+
+  audioTransceiver: null,
+  setAudioTransceiver: (transceiver: RTCRtpTransceiver) => set({ audioTransceiver: transceiver }),
 
   peerConnectionState: null,
   setPeerConnectionState: state => set({ peerConnectionState: state }),
@@ -372,6 +378,32 @@ export interface SettingsState {
 
   gamepadEnabled: boolean;
   setGamepadEnabled: (enabled: boolean) => void;
+
+  // Audio settings
+  audioOutputEnabled: boolean;
+  setAudioOutputEnabled: (enabled: boolean) => void;
+  microphoneEnabled: boolean;
+  setMicrophoneEnabled: (enabled: boolean) => void;
+  audioInputAutoEnable: boolean;
+  setAudioInputAutoEnable: (enabled: boolean) => void;
+
+  // Audio codec settings
+  audioBitrate: number;
+  setAudioBitrate: (value: number) => void;
+  audioComplexity: number;
+  setAudioComplexity: (value: number) => void;
+  audioDTXEnabled: boolean;
+  setAudioDTXEnabled: (enabled: boolean) => void;
+  audioFECEnabled: boolean;
+  setAudioFECEnabled: (enabled: boolean) => void;
+  audioBufferPeriods: number;
+  setAudioBufferPeriods: (value: number) => void;
+  audioSampleRate: number;
+  setAudioSampleRate: (value: number) => void;
+  audioPacketLossPerc: number;
+  setAudioPacketLossPerc: (value: number) => void;
+
+  resetMicrophoneState: () => void;
 }
 
 export const useSettingsStore = create(
@@ -421,6 +453,30 @@ export const useSettingsStore = create(
 
       gamepadEnabled: false,
       setGamepadEnabled: (enabled: boolean) => set({ gamepadEnabled: enabled }),
+
+      audioOutputEnabled: true,
+      setAudioOutputEnabled: (enabled: boolean) => set({ audioOutputEnabled: enabled }),
+      microphoneEnabled: false,
+      setMicrophoneEnabled: (enabled: boolean) => set({ microphoneEnabled: enabled }),
+      audioInputAutoEnable: false,
+      setAudioInputAutoEnable: (enabled: boolean) => set({ audioInputAutoEnable: enabled }),
+
+      audioBitrate: 128,
+      setAudioBitrate: (value: number) => set({ audioBitrate: value }),
+      audioComplexity: 5,
+      setAudioComplexity: (value: number) => set({ audioComplexity: value }),
+      audioDTXEnabled: true,
+      setAudioDTXEnabled: (enabled: boolean) => set({ audioDTXEnabled: enabled }),
+      audioFECEnabled: true,
+      setAudioFECEnabled: (enabled: boolean) => set({ audioFECEnabled: enabled }),
+      audioBufferPeriods: 12,
+      setAudioBufferPeriods: (value: number) => set({ audioBufferPeriods: value }),
+      audioSampleRate: 48000,
+      setAudioSampleRate: (value: number) => set({ audioSampleRate: value }),
+      audioPacketLossPerc: 20,
+      setAudioPacketLossPerc: (value: number) => set({ audioPacketLossPerc: value }),
+
+      resetMicrophoneState: () => set({ microphoneEnabled: false }),
     }),
     {
       name: "settings",

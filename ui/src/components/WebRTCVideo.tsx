@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useResizeObserver } from "usehooks-ts";
 
 import { cx } from "@/cva.config";
-import { isWindows } from "@/utils";
+import { isWindows, isSecureContext } from "@/utils";
 import useKeyboard from "@hooks/useKeyboard";
 import useMouse from "@hooks/useMouse";
 import { useRTCStore, useSettingsStore, useVideoStore } from "@hooks/stores";
@@ -23,14 +23,15 @@ import { m } from "@localizations/messages.js";
 export default function WebRTCVideo({ hasConnectionIssues }: { hasConnectionIssues: boolean }) {
   // Video and stream related refs and states
   const videoElm = useRef<HTMLVideoElement>(null);
+  const audioElementsRef = useRef<HTMLAudioElement[]>([]);
   const fullscreenContainerRef = useRef<HTMLDivElement>(null);
   const { mediaStream, peerConnectionState } = useRTCStore();
   const [isPlaying, setIsPlaying] = useState(false);
+  const [audioAutoplayBlocked, setAudioAutoplayBlocked] = useState(false);
   const [isPointerLockActive, setIsPointerLockActive] = useState(false);
   const [isKeyboardLockActive, setIsKeyboardLockActive] = useState(false);
 
-  const isPointerLockPossible =
-    window.location.protocol === "https:" || window.location.hostname === "localhost";
+  const isPointerLockPossible = isSecureContext();
 
   // Store hooks
   const settings = useSettingsStore();
@@ -264,6 +265,9 @@ export default function WebRTCVideo({ hasConnectionIssues }: { hasConnectionIssu
       code = "Henkan";
     } else if (code === "NonConvert") {
       code = "Muhenkan";
+    } else if (key === "Shift" && code === "") {
+      // Microsoft IME fix
+      code = "ShiftRight";
     }
 
     return code;
@@ -307,6 +311,13 @@ export default function WebRTCVideo({ hasConnectionIssues }: { hasConnectionIssu
           altGrLoopRef.current = true;
           lastKeyDownRef.current = null;
         }
+
+        // Microsoft IME fix:
+        // Effective keydown events are consumed by IME (reported as "Process"),
+        // so we handle the full press/release cycle in the keyup handler instead.
+        if (["Zenkaku", "Hankaku", "ZenkakuHankaku"].includes(e.key)) {
+          return;
+        }
       }
 
       // When pressing the meta key + another key, the key will never trigger a keyup
@@ -346,20 +357,29 @@ export default function WebRTCVideo({ hasConnectionIssues }: { hasConnectionIssu
         return;
       }
 
-      // On Windows, handle ControlLeft specially to preserve FIFO semantics with AltGr buffering.
-      if (isWindowsClient && hidKey === keys.ControlLeft) {
-        // Synthetic AltGr ControlLeft: never sent a down, swallow the release as well.
-        if (altGrLoopRef.current) {
-          altGrLoopRef.current = false;
-          return;
+      if (isWindowsClient) {
+        // On Windows, handle ControlLeft specially to preserve FIFO semantics with AltGr buffering.
+        if (hidKey === keys.ControlLeft) {
+          // Synthetic AltGr ControlLeft: never sent a down, swallow the release as well.
+          if (altGrLoopRef.current) {
+            altGrLoopRef.current = false;
+            return;
+          }
+
+          // Very fast real Ctrl tap: flush the pending down before the up.
+          if (lastKeyDownRef.current?.hidKey === keys.ControlLeft) {
+            handleKeyPress(keys.ControlLeft, true);
+          }
+
+          lastKeyDownRef.current = null;
         }
 
-        // Very fast real Ctrl tap: flush the pending down before the up.
-        if (lastKeyDownRef.current?.hidKey === keys.ControlLeft) {
-          handleKeyPress(keys.ControlLeft, true);
+        // Microsoft IME fix:
+        // Synthesize the missing keydown event to ensure a complete key press cycle.
+        if (["Zenkaku", "Hankaku", "ZenkakuHankaku"].includes(e.key)) {
+          console.debug(`Synthesizing missed key down for IME key: ${e.key}`);
+          handleKeyPress(hidKey, true);
         }
-
-        lastKeyDownRef.current = null;
       }
 
       console.debug(`Key up: ${hidKey}`);
@@ -401,13 +421,37 @@ export default function WebRTCVideo({ hasConnectionIssues }: { hasConnectionIssu
       peerConnection.addEventListener(
         "track",
         (e: RTCTrackEvent) => {
-          addStreamToVideoElm(e.streams[0]);
+          if (e.track.kind === "video") {
+            addStreamToVideoElm(e.streams[0]);
+          } else if (e.track.kind === "audio") {
+            const audioElm = document.createElement("audio");
+            audioElm.srcObject = e.streams[0];
+            audioElm.style.display = "none";
+            document.body.appendChild(audioElm);
+            audioElementsRef.current.push(audioElm);
+
+            audioElm
+              .play()
+              .then(() => {
+                setAudioAutoplayBlocked(false);
+              })
+              .catch(() => {
+                console.debug("[Audio] Autoplay blocked, will be started by user interaction");
+                setAudioAutoplayBlocked(true);
+              });
+          }
         },
         { signal },
       );
 
       return () => {
         abortController.abort();
+        audioElementsRef.current.forEach(audioElm => {
+          audioElm.srcObject = null;
+          audioElm.remove();
+        });
+        audioElementsRef.current = [];
+        setAudioAutoplayBlocked(false);
       };
     },
     [addStreamToVideoElm, peerConnection],
@@ -522,11 +566,19 @@ export default function WebRTCVideo({ hasConnectionIssues }: { hasConnectionIssu
 
   const hasNoAutoPlayPermissions = useMemo(() => {
     if (peerConnection?.connectionState !== "connected") return false;
-    if (isPlaying) return false;
     if (hdmiError) return false;
     if (videoHeight === 0 || videoWidth === 0) return false;
-    return true;
-  }, [hdmiError, isPlaying, peerConnection?.connectionState, videoHeight, videoWidth]);
+    if (!isPlaying) return true;
+    if (audioAutoplayBlocked) return true;
+    return false;
+  }, [
+    audioAutoplayBlocked,
+    hdmiError,
+    isPlaying,
+    peerConnection?.connectionState,
+    videoHeight,
+    videoWidth,
+  ]);
 
   const showPointerLockBar = useMemo(() => {
     if (settings.mouseMode !== "relative") return false;
@@ -594,7 +646,6 @@ export default function WebRTCVideo({ hasConnectionIssues }: { hasConnectionIssu
                         controls={false}
                         onPlaying={onVideoPlaying}
                         onPlay={onVideoPlaying}
-                        muted
                         playsInline
                         disablePictureInPicture
                         controlsList="nofullscreen"
@@ -626,6 +677,14 @@ export default function WebRTCVideo({ hasConnectionIssues }: { hasConnectionIssu
                               show={hasNoAutoPlayPermissions}
                               onPlayClick={() => {
                                 videoElm.current?.play();
+                                audioElementsRef.current.forEach(audioElm => {
+                                  audioElm
+                                    .play()
+                                    .then(() => {
+                                      setAudioAutoplayBlocked(false);
+                                    })
+                                    .catch(() => undefined);
+                                });
                               }}
                             />
                           </div>

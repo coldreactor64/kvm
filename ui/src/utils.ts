@@ -300,6 +300,10 @@ export function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+export function isSecureContext(): boolean {
+  return window.location.protocol === "https:" || window.location.hostname === "localhost";
+}
+
 /**
  * Builds a versioned cloud URL for a device.
  * Uses the device's app version to construct /v/{version}/devices/{id}{path}
