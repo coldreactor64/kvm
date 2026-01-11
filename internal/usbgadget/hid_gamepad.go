@@ -16,28 +16,29 @@ var gamepadConfig = gadgetConfigItem{
 	attrs: gadgetAttributes{
 		"protocol":        "0",
 		"subclass":        "0",
-		"report_length":   "8",
+		"report_length":   "9",
 		"no_out_endpoint": "1",
 	},
 	reportDesc: gamepadReportDesc,
 }
 
 // Gamepad HID Report Descriptor
-// Standard gamepad layout compatible with most systems:
-// - 2 analog sticks (left: X/Y, right: Rx/Ry) - 8-bit each (0-255, 128 center)
+// Gamepad layout aligned to Z/Rz right stick parsing:
+// - 2 analog sticks (left: X/Y, right: Z/Rz) - 8-bit each (0-255, 128 center)
 // - D-pad as Hat Switch (8 directions + center)
 // - 16 buttons
-// - 2 triggers (Z/Rz) - 8-bit each (0-255)
+// - 2 triggers (Rx/Ry) - 8-bit each (0-255)
 //
-// Report format (8 bytes):
+// Report format (9 bytes):
 // Byte 0: Left stick X (0-255, 128 = center)
 // Byte 1: Left stick Y (0-255, 128 = center)
 // Byte 2: Right stick X (0-255, 128 = center)
 // Byte 3: Right stick Y (0-255, 128 = center)
-// Byte 4: Left trigger (0-255) / Hat switch (low nibble: 0-8)
-// Byte 5: Right trigger (0-255)
-// Byte 6: Buttons 1-8 (A, B, X, Y, LB, RB, Back, Start)
-// Byte 7: Buttons 9-16 (L3, R3, Guide, and 5 reserved)
+// Byte 4: Left trigger (0-255, Rx)
+// Byte 5: Right trigger (0-255, Ry)
+// Byte 6: Hat (values 0-8, upper nibble padding)
+// Byte 7: Buttons 1-8 (X, A, B, Y, LB, RB, L2, R2)
+// Byte 8: Buttons 9-16 (Back, Start, L3, R3, Guide, and 3 reserved)
 var gamepadReportDesc = []byte{
 	0x05, 0x01, // USAGE_PAGE (Generic Desktop)
 	0x09, 0x05, // USAGE (Game Pad)
@@ -55,11 +56,11 @@ var gamepadReportDesc = []byte{
 	0x81, 0x02, //     INPUT (Data,Var,Abs)
 	0xC0, //   END_COLLECTION
 
-	// Right Analog Stick
+	// Right Analog Stick (Z/Rz axes)
 	0x09, 0x01, //   USAGE (Pointer)
 	0xA1, 0x00, //   COLLECTION (Physical)
-	0x09, 0x33, //     USAGE (Rx)
-	0x09, 0x34, //     USAGE (Ry)
+	0x09, 0x32, //     USAGE (Z)
+	0x09, 0x35, //     USAGE (Rz)
 	0x15, 0x00, //     LOGICAL_MINIMUM (0)
 	0x26, 0xFF, 0x00, // LOGICAL_MAXIMUM (255)
 	0x75, 0x08, //     REPORT_SIZE (8)
@@ -67,14 +68,27 @@ var gamepadReportDesc = []byte{
 	0x81, 0x02, //     INPUT (Data,Var,Abs)
 	0xC0, //   END_COLLECTION
 
-	// Triggers (Z and Rz axes)
-	0x09, 0x32, //   USAGE (Z) - Left Trigger
-	0x09, 0x35, //   USAGE (Rz) - Right Trigger
+	// Triggers (Rx and Ry axes)
+	0x09, 0x33, //   USAGE (Rx) - Left Trigger
+	0x09, 0x34, //   USAGE (Ry) - Right Trigger
 	0x15, 0x00, //   LOGICAL_MINIMUM (0)
 	0x26, 0xFF, 0x00, // LOGICAL_MAXIMUM (255)
 	0x75, 0x08, //   REPORT_SIZE (8)
 	0x95, 0x02, //   REPORT_COUNT (2)
 	0x81, 0x02, //   INPUT (Data,Var,Abs)
+
+	// Hat switch (D-pad)
+	0x09, 0x39, //   USAGE (Hat switch)
+	0x15, 0x00, //   LOGICAL_MINIMUM (0)
+	0x25, 0x07, //   LOGICAL_MAXIMUM (7)
+	0x35, 0x00, //   PHYSICAL_MINIMUM (0)
+	0x46, 0x3B, 0x01, // PHYSICAL_MAXIMUM (315 degrees)
+	0x65, 0x14, //   UNIT (English Rotation, Degree)
+	0x75, 0x04, 0x95, 0x01, // REPORT_SIZE=4, REPORT_COUNT=1
+	0x81, 0x42, //   INPUT (Data,Var,Abs,Null State)
+	0x65, 0x00, //   UNIT (None)
+	0x75, 0x04, 0x95, 0x01, // REPORT_SIZE=4, REPORT_COUNT=1 (padding)
+	0x81, 0x01, //   INPUT (Const,Array,Abs) - padding
 
 	// Buttons (16 buttons)
 	0x05, 0x09, //   USAGE_PAGE (Button)
@@ -119,6 +133,97 @@ const (
 	GamepadButtonDPadRight uint16 = 1 << 14 // D-Pad Right (Button 15)
 	// Button 16 reserved
 )
+
+const (
+	hatUp = iota
+	hatUpRight
+	hatRight
+	hatDownRight
+	hatDown
+	hatDownLeft
+	hatLeft
+	hatUpLeft
+	hatNeutral = 8
+)
+
+const dpadMask = GamepadButtonDPadUp |
+	GamepadButtonDPadDown |
+	GamepadButtonDPadLeft |
+	GamepadButtonDPadRight
+
+func buttonsToHat(buttons uint16) uint8 {
+	up := buttons&GamepadButtonDPadUp != 0
+	down := buttons&GamepadButtonDPadDown != 0
+	left := buttons&GamepadButtonDPadLeft != 0
+	right := buttons&GamepadButtonDPadRight != 0
+
+	switch {
+	case up && right:
+		return hatUpRight
+	case up && left:
+		return hatUpLeft
+	case down && right:
+		return hatDownRight
+	case down && left:
+		return hatDownLeft
+	case up:
+		return hatUp
+	case down:
+		return hatDown
+	case right:
+		return hatRight
+	case left:
+		return hatLeft
+	default:
+		return hatNeutral
+	}
+}
+
+func mapButtonsToOgx(buttons uint16, leftTrigger, rightTrigger uint8) uint16 {
+	var mapped uint16
+
+	if buttons&GamepadButtonX != 0 {
+		mapped |= 1 << 0
+	}
+	if buttons&GamepadButtonA != 0 {
+		mapped |= 1 << 1
+	}
+	if buttons&GamepadButtonB != 0 {
+		mapped |= 1 << 2
+	}
+	if buttons&GamepadButtonY != 0 {
+		mapped |= 1 << 3
+	}
+	if buttons&GamepadButtonLB != 0 {
+		mapped |= 1 << 4
+	}
+	if buttons&GamepadButtonRB != 0 {
+		mapped |= 1 << 5
+	}
+	if leftTrigger > 0 {
+		mapped |= 1 << 6
+	}
+	if rightTrigger > 0 {
+		mapped |= 1 << 7
+	}
+	if buttons&GamepadButtonBack != 0 {
+		mapped |= 1 << 8
+	}
+	if buttons&GamepadButtonStart != 0 {
+		mapped |= 1 << 9
+	}
+	if buttons&GamepadButtonL3 != 0 {
+		mapped |= 1 << 10
+	}
+	if buttons&GamepadButtonR3 != 0 {
+		mapped |= 1 << 11
+	}
+	if buttons&GamepadButtonGuide != 0 {
+		mapped |= 1 << 12
+	}
+
+	return mapped
+}
 
 var gamepadWriteHidFileLock sync.Mutex
 
@@ -189,16 +294,21 @@ func (u *UsbGadget) GamepadReport(state GamepadState) error {
 	u.gamepadLock.Lock()
 	defer u.gamepadLock.Unlock()
 
-	// Build the 8-byte HID report
+	hat := buttonsToHat(state.Buttons)
+	buttons := state.Buttons & ^dpadMask
+	mappedButtons := mapButtonsToOgx(buttons, state.LeftTrigger, state.RightTrigger)
+
+	// Build the 9-byte HID report
 	report := []byte{
-		state.LeftStickX,            // Byte 0: Left stick X
-		state.LeftStickY,            // Byte 1: Left stick Y
-		state.RightStickX,           // Byte 2: Right stick X
-		state.RightStickY,           // Byte 3: Right stick Y
-		state.LeftTrigger,           // Byte 4: Left trigger
-		state.RightTrigger,          // Byte 5: Right trigger
-		byte(state.Buttons & 0xFF),  // Byte 6: Buttons 1-8
-		byte(state.Buttons >> 8),    // Byte 7: Buttons 9-16
+		state.LeftStickX,  // Byte 0: Left stick X
+		state.LeftStickY,  // Byte 1: Left stick Y
+		state.RightStickX, // Byte 2: Right stick X
+		state.RightStickY, // Byte 3: Right stick Y
+		state.LeftTrigger, // Byte 4: Left trigger
+		state.RightTrigger, // Byte 5: Right trigger
+		hat & 0x0F,                 // Byte 6: Hat (low nibble)
+		byte(mappedButtons),        // Byte 7: Buttons 1-8
+		byte(mappedButtons >> 8),   // Byte 8: Buttons 9-16
 	}
 
 	err := u.gamepadWriteHidFile(report)
@@ -210,7 +320,7 @@ func (u *UsbGadget) GamepadReport(state GamepadState) error {
 	return nil
 }
 
-// GamepadReportRaw sends a raw 8-byte gamepad HID report
+// GamepadReportRaw sends a raw 9-byte gamepad HID report
 func (u *UsbGadget) GamepadReportRaw(
 	leftStickX, leftStickY uint8,
 	rightStickX, rightStickY uint8,

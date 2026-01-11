@@ -205,6 +205,7 @@ export default function Actionbar({
               <PopoverPanel
                 anchor="bottom start"
                 transition
+                unmount={false}
                 className={cx(
                   "z-10 flex w-[420px] origin-top flex-col overflow-visible!",
                   "flex origin-top flex-col transition duration-300 ease-out data-closed:translate-y-8 data-closed:opacity-0",
